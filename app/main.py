@@ -26,7 +26,8 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 # Configure logging
@@ -42,6 +43,24 @@ app = FastAPI(
     description="GasUp ingestion + retention + reconciliation engine for Central Gas",
     version="0.1.0-phase1",
 )
+
+
+# ============================================================
+# Static files + dashboard
+# ============================================================
+# Mount /static for any future static assets (CSS, images, etc.)
+_STATIC_DIR = Path(__file__).parent / "static"
+if _STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+
+@app.get("/dashboard", include_in_schema=False)
+async def dashboard():
+    """Serve the single-file React dashboard (app/static/dashboard.html)."""
+    dashboard_path = _STATIC_DIR / "dashboard.html"
+    if not dashboard_path.exists():
+        raise HTTPException(status_code=404, detail="Dashboard not deployed")
+    return FileResponse(str(dashboard_path), media_type="text/html")
 
 
 # ============================================================
@@ -76,9 +95,11 @@ async def root():
         "stations": ["ECG-01 Nacozari", "ECG-02 Ojo Caliente", "ECG-03 Peñuelas"],
         "endpoints": {
             "health": "/health",
+            "dashboard": "/dashboard",
             "upload": "POST /upload-excel",
             "transactions": "GET /transactions",
             "stats": "GET /stats",
+            "sobreprecio": "GET /sobreprecio/distribution",
             "docs": "/docs",
         },
     }

@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Central Gas — Dashboard</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⛽</text></svg>" />
+
+  <!-- Tailwind (CDN, for MVP) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- React 18 UMD -->
+  <script crossorigin src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+
+  <!-- Recharts UMD (needs prop-types) -->
+  <script crossorigin src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js"></script>
+  <script crossorigin src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js"></script>
+
+  <!-- Babel standalone for JSX in-browser -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    .loading-pulse { animation: pulse 1.5s ease-in-out infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+  </style>
+</head>
+<body class="bg-gray-50 text-gray-900">
+  <div id="root">
+    <div class="min-h-screen flex items-center justify-center">
+      <div class="text-gray-500 text-lg">Cargando dashboard…</div>
+    </div>
+  </div>
+
+  <script type="text/babel" data-presets="react">
+    const { useState, useEffect, useMemo, useCallback } = React;
+    const {
+      LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid,
+      ResponsiveContainer, Legend, Cell,
+    } = Recharts;
+
+    // ====================================================
+    // Config + helpers
+    // ====================================================
+
+    const API_BASE = window.location.origin;
+
+    const mxn = (n) => new Intl.NumberFormat('es-MX', {
+      style: 'currency', currency: 'MXN', maximumFractionDigits: 0,
+    }).format(n || 0);
+
+    const num = (n, digits = 0) => new Intl.NumberFormat('es-MX', {
+      maximumFractionDigits: digits,
+    }).format(n || 0);
+
+    const dtfmt = (iso) => {
+      if (!iso) return '—';
+      try {
+        const d = new Date(iso);
+        return d.toLocaleString('es-MX', {
+          day: '2-digit', month: 'short', year: 'numeric',
+          hour: '2-digit', minute: '2-digit', hour12: false,
+        });
+      } catch { return iso; }
+    };
+
+    const datefmt = (iso) => {
+      if (!iso) return '—';
+      try {
+        const d = new Date(iso);
+        return d.toLocaleDateString('es-MX', {
+          day: '2-digit', month: 'short', year: '2-digit',
+        });
+      } catch { return iso; }
+    };
+
+    const COLORS = ['#2563eb', '#0891b2', '#14b8a6', '#22c55e', '#eab308', '#f97316', '#ef4444', '#a855f7', '#ec4899', '#64748b'];
+
+    // ====================================================
+    // API client
+    // ====================================================
+
+    async function apiGet(path) {
+      const res = await fetch(API_BASE + path, { headers: { 'Accept': 'application/json' } });
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text().catch(() => res.statusText)}`);
+      return res.json();
+    }
+
+    // ====================================================
+    // Generic UI primitives
+    // ====================================================
+
+    function Card({ title, subtitle, children, className = '' }) {
+      return (
+        <div className={`bg-white rounded-lg shadow-sm border border-gray-200 p-5 ${className}`}>
+          {title && <div className="flex items-baseline justify-between mb-3">
+            <h3 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">{title}</h3>
+            {subtitle && <span className="text-xs text-gray-400">{subtitle}</span>}
+          </div>}
+          {children}
+        </div>
+      );
+    }
+
+    function Kpi({ label, value, sub, color = 'blue' }) {
+      const ring = {
+        blue:   'bg-blue-50 text-blue-700',
+        green:  'bg-green-50 text-green-700',
+        amber:  'bg-amber-50 text-amber-700',
+        purple: 'bg-purple-50 text-purple-700',
+      }[color] || 'bg-gray-50 text-gray-700';
+      return (
+        <div className={`rounded-lg p-4 ${ring}`}>
+          <div className="text-xs font-medium uppercase tracking-wide opacity-70">{label}</div>
+          <div className="text-2xl font-bold mt-1">{value}</div>
+          {sub && <div className="text-xs opacity-60 mt-1">{sub}</div>}
+        </div>
+      );
+    }
+
+    function LoadingBlock({ text = 'Cargando…' }) {
+      return <div className="loading-pulse text-gray-400 text-sm py-6 text-center">{text}</div>;
+    }
+
+    function ErrorBlock({ error }) {
+      return (
+        <div className="bg-red-50 border border-red-200 text-red-700 rounded p-3 text-sm">
+          <strong>Error:</strong> {error.message || String(error)}
+        </div>
+      );
+    }
+
+    // ====================================================
+    // Header with tabs
+    // ====================================================
+
+    function Header({ tab, onTab }) {
+      const tabs = [
+        { id: 'resumen', label: 'Resumen' },
+        { id: 'txn', label: 'Transacciones' },
+        { id: 'sp', label: 'Sobreprecio' },
+      ];
+      return (
+        <header className="bg-white shadow-sm border-b border-gray-200 sticky top-0 z-10">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div className="flex items-center justify-between h-14">
+              <div className="flex items-center gap-3">
+                <span className="text-2xl">⛽</span>
+                <div>
+                  <h1 className="text-lg font-bold text-gray-900 leading-none">Central Gas</h1>
+                  <p className="text-xs text-gray-500">Agente IA · Fase 1 · Validación</p>
+                </div>
+              </div>
+              <nav className="flex items-center gap-1">
+                {tabs.map(t => (
+                  <button
+                    key={t.id}
+                    onClick={() => onTab(t.id)}
+                    className={`px-4 py-2 rounded-md text-sm font-medium transition ${
+                      tab === t.id
+                        ? 'bg-blue-600 text-white shadow-sm'
+                        : 'text-gray-600 hover:bg-gray-100'
+                    }`}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </nav>
+            </div>
+          </div>
+        </header>
+      );
+    }
+
+    // ====================================================
+    // Resumen tab
+    // ====================================================
+
+    function ResumenTab() {
+      const [stats, setStats] = useState(null);
+      const [err, setErr] = useState(null);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        apiGet('/stats')
+          .then(setStats)
+          .catch(setErr)
+          .finally(() => setLoading(false));
+      }, []);
+
+      if (loading) return <LoadingBlock text="Cargando métricas…" />;
+      if (err) return <ErrorBlock error={err} />;
+      if (!stats) return null;
+
+      const byDay = [...(stats.by_day || [])].reverse();  // oldest first for line chart
+      const byEstacion = (stats.by_estacion || []).slice(0, 10);
+      const byMedio = stats.by_medio_pago || [];
+
+      const avgTicket = stats.total_transactions
+        ? stats.total_mxn / stats.total_transactions
+        : 0;
+      const avgLitros = stats.total_transactions
+        ? stats.total_litros / stats.total_transactions
+        : 0;
+
+      return (
+        <div className="space-y-6">
+          {/* KPI row */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <Kpi
+              label="Transacciones"
+              value={num(stats.total_transactions)}
+              sub={stats.date_range?.days ? `${stats.date_range.days} días de datos` : ''}
+              color="blue"
+            />
+            <Kpi
+              label="Litros (LEQ)"
+              value={num(stats.total_litros, 0)}
+              sub={`≈ ${num(stats.total_kg, 0)} kg`}
+              color="green"
+            />
+            <Kpi
+              label="Revenue"
+              value={mxn(stats.total_mxn)}
+              sub={`IVA: ${mxn(stats.total_iva)}`}
+              color="purple"
+            />
+            <Kpi
+              label="Sobreprecio capturado"
+              value={mxn(stats.total_sobreprecio)}
+              sub={`Ticket prom: ${mxn(avgTicket)}`}
+              color="amber"
+            />
+          </div>
+
+          {/* Secondary KPI row */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <Card title="Periodo" className="!p-4">
+              <div className="text-sm text-gray-700">
+                <div>Del <strong>{datefmt(stats.date_range?.min)}</strong></div>
+                <div>Al <strong>{datefmt(stats.date_range?.max)}</strong></div>
+              </div>
+            </Card>
+            <Card title="Carga promedio" className="!p-4">
+              <div className="text-2xl font-bold text-gray-900">{num(avgLitros, 1)} <span className="text-sm font-normal text-gray-500">LEQ</span></div>
+              <div className="text-xs text-gray-500 mt-1">ticket prom: {mxn(avgTicket)}</div>
+            </Card>
+            <Card title="Medios de pago" className="!p-4">
+              <div className="text-sm text-gray-700 space-y-1">
+                {byMedio.slice(0, 3).map((m, i) => (
+                  <div key={i} className="flex justify-between">
+                    <span className="truncate max-w-[120px]">{m.medio_pago}</span>
+                    <strong>{m.pct}%</strong>
+                  </div>
+                ))}
+              </div>
+            </Card>
+            <Card title="Estaciones activas" className="!p-4">
+              <div className="text-2xl font-bold text-gray-900">{byEstacion.length}</div>
+              <div className="text-xs text-gray-500 mt-1">{byEstacion[0]?.station_natgas || '—'} lidera</div>
+            </Card>
+          </div>
+
+          {/* Charts row */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <Card title="Ventas últimos 30 días" subtitle={`${byDay.length} días`}>
+              {byDay.length === 0 ? (
+                <div className="text-gray-400 text-sm py-8 text-center">Sin datos</div>
+              ) : (
+                <ResponsiveContainer width="100%" height={260}>
+                  <LineChart data={byDay} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                    <XAxis dataKey="day" tickFormatter={(d) => {
+                      const x = new Date(d);
+                      return `${x.getDate()}/${x.getMonth()+1}`;
+                    }} />
+                    <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
+                    <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} />
+                    <Tooltip
+                      formatter={(value, name) => {
+                        if (name === 'Litros') return [num(value, 0) + ' LEQ', name];
+                        if (name === 'Revenue') return [mxn(value), name];
+                        return [value, name];
+                      }}
+                      labelFormatter={(d) => `Día ${d}`}
+                    />
+                    <Legend />
+                    <Line yAxisId="left"  type="monotone" dataKey="litros"   stroke="#2563eb" name="Litros" dot={false} strokeWidth={2} />
+                    <Line yAxisId="right" type="monotone" dataKey="mxn"      stroke="#22c55e" name="Revenue" dot={false} strokeWidth={2} />
+                  </LineChart>
+                </ResponsiveContainer>
+              )}
+            </Card>
+
+            <Card title="Top 10 estaciones" subtitle="por volumen">
+              {byEstacion.length === 0 ? (
+                <div className="text-gray-400 text-sm py-8 text-center">Sin datos</div>
+              ) : (
+                <ResponsiveContainer width="100%" height={260}>
+                  <BarChart data={byEstacion} layout="vertical" margin={{ top: 5, right: 20, bottom: 5, left: 110 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                    <XAxis type="number" tick={{ fontSize: 11 }} tickFormatter={(n) => num(n, 0)} />
+                    <YAxis type="category" dataKey="station_natgas" tick={{ fontSize: 11 }} width={100} />
+                    <Tooltip formatter={(v) => [num(v, 0) + ' LEQ', 'Litros']} />
+                    <Bar dataKey="litros" radius={[0, 4, 4, 0]}>
+                      {byEstacion.map((e, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
+            </Card>
+          </div>
+        </div>
+      );
+    }
+
+    // ====================================================
+    // Transacciones tab
+    // ====================================================
+
+    function TxnTab() {
+      const [limit] = useState(50);
+      const [offset, setOffset] = useState(0);
+      const [filters, setFilters] = useState({ estacion: '', placa: '', date_from: '', date_to: '' });
+      const [data, setData] = useState(null);
+      const [loading, setLoading] = useState(false);
+      const [err, setErr] = useState(null);
+
+      const fetchPage = useCallback(async () => {
+        setLoading(true);
+        setErr(null);
+        try {
+          const qs = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+          if (filters.estacion) qs.set('estacion', filters.estacion);
+          if (filters.placa) qs.set('placa', filters.placa);
+          if (filters.date_from) qs.set('date_from', filters.date_from);
+          if (filters.date_to) qs.set('date_to', filters.date_to);
+          const d = await apiGet('/transactions?' + qs.toString());
+          setData(d);
+        } catch (e) {
+          setErr(e);
+        } finally {
+          setLoading(false);
+        }
+      }, [limit, offset, filters]);
+
+      useEffect(() => { fetchPage(); }, [fetchPage]);
+
+      const applyFilters = (e) => {
+        e.preventDefault();
+        setOffset(0);
+        fetchPage();
+      };
+
+      const clearFilters = () => {
+        setFilters({ estacion: '', placa: '', date_from: '', date_to: '' });
+        setOffset(0);
+      };
+
+      const page = Math.floor(offset / limit) + 1;
+      const totalPages = data ? Math.ceil((data.total || 0) / limit) : 0;
+
+      return (
+        <div className="space-y-4">
+          {/* Filters */}
+          <Card title="Filtros">
+            <form onSubmit={applyFilters} className="grid grid-cols-1 sm:grid-cols-5 gap-3">
+              <input
+                type="text" placeholder="Estación (ej: Nacozari)"
+                className="px-3 py-2 border border-gray-300 rounded text-sm"
+                value={filters.estacion}
+                onChange={e => setFilters({...filters, estacion: e.target.value})}
+              />
+              <input
+                type="text" placeholder="Placa (ej: A12345A)"
+                className="px-3 py-2 border border-gray-300 rounded text-sm uppercase"
+                value={filters.placa}
+                onChange={e => setFilters({...filters, placa: e.target.value.toUpperCase()})}
+              />
+              <input
+                type="date" className="px-3 py-2 border border-gray-300 rounded text-sm"
+                value={filters.date_from}
+                onChange={e => setFilters({...filters, date_from: e.target.value})}
+              />
+              <input
+                type="date" className="px-3 py-2 border border-gray-300 rounded text-sm"
+                value={filters.date_to}
+                onChange={e => setFilters({...filters, date_to: e.target.value})}
+              />
+              <div className="flex gap-2">
+                <button type="submit" className="flex-1 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium py-2 px-3 rounded">Aplicar</button>
+                <button type="button" onClick={clearFilters} className="bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm font-medium py-2 px-3 rounded">Limpiar</button>
+              </div>
+            </form>
+          </Card>
+
+          {/* Results */}
+          <Card
+            title="Transacciones"
+            subtitle={data ? `${num(data.total || 0)} resultados · página ${page} de ${totalPages || 1}` : ''}
+          >
+            {loading && <LoadingBlock />}
+            {err && <ErrorBlock error={err} />}
+            {!loading && !err && data && (
+              <>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full text-sm">
+                    <thead className="bg-gray-50 border-b border-gray-200">
+                      <tr>
+                        <th className="px-3 py-2 text-left font-semibold text-gray-700">Fecha</th>
+                        <th className="px-3 py-2 text-left font-semibold text-gray-700">Estación</th>
+                        <th className="px-3 py-2 text-left font-semibold text-gray-700">Placa</th>
+                        <th className="px-3 py-2 text-right font-semibold text-gray-700">Litros</th>
+                        <th className="px-3 py-2 text-right font-semibold text-gray-700">PVP</th>
+                        <th className="px-3 py-2 text-right font-semibold text-gray-700">Total</th>
+                        <th className="px-3 py-2 text-right font-semibold text-gray-700">Sobreprecio/LEQ</th>
+                        <th className="px-3 py-2 text-left font-semibold text-gray-700">Medio</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {(data.rows || []).map((r, i) => (
+                        <tr key={r.id || i} className="hover:bg-gray-50">
+                          <td className="px-3 py-2 whitespace-nowrap text-gray-600">{dtfmt(r.timestamp_local)}</td>
+                          <td className="px-3 py-2 text-gray-900 truncate max-w-[140px]" title={r.station_natgas}>{r.station_natgas || '—'}</td>
+                          <td className="px-3 py-2 font-mono text-gray-900">{r.placa}</td>
+                          <td className="px-3 py-2 text-right tabular-nums">{num(r.litros, 2)}</td>
+                          <td className="px-3 py-2 text-right tabular-nums">{mxn(r.pvp).replace('MX$', '$')}</td>
+                          <td className="px-3 py-2 text-right tabular-nums font-semibold">{mxn(r.total_mxn)}</td>
+                          <td className="px-3 py-2 text-right tabular-nums text-amber-700">{r.recaudo_pagado ? mxn(r.recaudo_pagado) : '—'}</td>
+                          <td className="px-3 py-2 text-gray-600">{r.medio_pago || '—'}</td>
+                        </tr>
+                      ))}
+                      {(data.rows || []).length === 0 && (
+                        <tr><td colSpan="8" className="px-3 py-6 text-center text-gray-400">Sin resultados</td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Pagination */}
+                <div className="flex items-center justify-between mt-4 pt-4 border-t border-gray-200">
+                  <div className="text-xs text-gray-500">
+                    Mostrando {offset + 1}-{Math.min(offset + limit, data.total)} de {num(data.total)}
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setOffset(Math.max(0, offset - limit))}
+                      disabled={offset === 0}
+                      className="px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200 disabled:opacity-40 disabled:cursor-not-allowed rounded"
+                    >← Anterior</button>
+                    <button
+                      onClick={() => setOffset(offset + limit)}
+                      disabled={offset + limit >= data.total}
+                      className="px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200 disabled:opacity-40 disabled:cursor-not-allowed rounded"
+                    >Siguiente →</button>
+                  </div>
+                </div>
+              </>
+            )}
+          </Card>
+        </div>
+      );
+    }
+
+    // ====================================================
+    // Sobreprecio tab
+    // ====================================================
+
+    function SobreprecioTab() {
+      const [data, setData] = useState(null);
+      const [err, setErr] = useState(null);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        apiGet('/sobreprecio/distribution')
+          .then(setData)
+          .catch(setErr)
+          .finally(() => setLoading(false));
+      }, []);
+
+      if (loading) return <LoadingBlock text="Calculando distribución…" />;
+      if (err) return <ErrorBlock error={err} />;
+      if (!data) return null;
+
+      const stats = data.stats || {};
+      const buckets = data.buckets || [];
+
+      return (
+        <div className="space-y-6">
+          {/* Summary stats */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <Kpi label="Transacciones con sobreprecio" value={num(stats.n_nonzero)} sub={`de ${num(stats.n_total)} total`} color="amber" />
+            <Kpi label="Promedio / LEQ" value={`$${num(stats.mean, 2)}`} sub="(solo > 0)" color="blue" />
+            <Kpi label="Mediana / LEQ" value={`$${num(stats.median, 2)}`} color="green" />
+            <Kpi label="Max / LEQ" value={`$${num(stats.max, 2)}`} sub={`p99: $${num(stats.p99, 2)}`} color="purple" />
+          </div>
+
+          {/* Histogram */}
+          <Card title="Distribución del sobreprecio por LEQ" subtitle={`${buckets.length} buckets · solo transacciones > 0`}>
+            {buckets.length === 0 ? (
+              <div className="text-gray-400 text-sm py-8 text-center">
+                Sin datos de sobreprecio aún. Los reportes tipo <code>recaudos_financiera</code> son los que alimentan esta vista.
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={320}>
+                <BarChart data={buckets} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                  <XAxis
+                    dataKey="lower"
+                    tick={{ fontSize: 11 }}
+                    tickFormatter={(v) => `$${num(v, 1)}`}
+                  />
+                  <YAxis tick={{ fontSize: 11 }} />
+                  <Tooltip
+                    formatter={(v, _, props) => [`${num(v)} tx (${props.payload.pct}%)`, 'Cuenta']}
+                    labelFormatter={(lo, arr) => {
+                      const row = arr[0]?.payload;
+                      if (!row) return '';
+                      return row.upper == null
+                        ? `≥ $${num(row.lower, 2)}`
+                        : `$${num(row.lower, 2)} – $${num(row.upper, 2)}`;
+                    }}
+                  />
+                  <Bar dataKey="count" fill="#f59e0b" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
+          </Card>
+
+          {/* Detailed stats */}
+          <Card title="Estadísticos descriptivos">
+            <dl className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+              {[
+                ['Mínimo', stats.min],
+                ['P25', stats.p25],
+                ['Mediana', stats.median],
+                ['Promedio', stats.mean],
+                ['P75', stats.p75],
+                ['P90', stats.p90],
+                ['P95', stats.p95],
+                ['P99', stats.p99],
+                ['Máximo', stats.max],
+                ['Desv. Estd.', stats.stddev],
+              ].map(([k, v]) => (
+                <div key={k} className="border-l-2 border-amber-300 pl-3">
+                  <dt className="text-xs uppercase text-gray-500 font-medium">{k}</dt>
+                  <dd className="text-lg font-semibold text-gray-900 tabular-nums">${num(v, 4)}</dd>
+                </div>
+              ))}
+            </dl>
+          </Card>
+        </div>
+      );
+    }
+
+    // ====================================================
+    // App
+    // ====================================================
+
+    function App() {
+      const [tab, setTab] = useState('resumen');
+      const [version, setVersion] = useState(null);
+
+      useEffect(() => {
+        apiGet('/health').then(d => setVersion(d.version)).catch(() => {});
+      }, []);
+
+      return (
+        <div className="min-h-screen bg-gray-50">
+          <Header tab={tab} onTab={setTab} />
+          <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+            {tab === 'resumen' && <ResumenTab />}
+            {tab === 'txn' && <TxnTab />}
+            {tab === 'sp' && <SobreprecioTab />}
+          </main>
+          <footer className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 text-xs text-gray-400 text-center">
+            {version && <span>Central Gas Agent {version} · </span>}
+            <a href="/docs" className="underline hover:text-gray-600">API Docs</a> ·
+            <a href="https://github.com/josuehernandeztapia/centralgas" className="underline hover:text-gray-600 ml-1">GitHub</a>
+          </footer>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
