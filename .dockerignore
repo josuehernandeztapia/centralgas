@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env
+
+# Local secrets and data
+*.env
+!.env.example
+data/
+output/
+*.xls
+*.xlsx
+*.csv
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Git
+.git/
+.gitignore
+
+# Docs and tests (uncomment to slim image further)
+# docs/
+# tests/
+
+# Fly.io artifacts
+.fly/
+fly.toml.backup
+
+# Build artifacts
+dist/
+build/
+*.log

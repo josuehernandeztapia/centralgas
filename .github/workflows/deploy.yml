@@ -1,0 +1,72 @@
+name: Fly Deploy
+
+# Triggers:
+#   - Push to main → auto-deploy
+#   - Manual dispatch → deploy on demand from GitHub UI
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_migration:
+        description: "Run pending migrations after deploy?"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+
+# Prevent overlapping deploys
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to Fly.io
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy app
+        run: flyctl deploy --remote-only --app central-gas-agent
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Wait for app to be reachable
+        run: |
+          for i in {1..30}; do
+            if curl -fsS https://central-gas-agent.fly.dev/health > /dev/null; then
+              echo "✅ App is healthy"
+              curl -s https://central-gas-agent.fly.dev/health
+              exit 0
+            fi
+            echo "Waiting for app... ($i/30)"
+            sleep 5
+          done
+          echo "❌ App did not become healthy"
+          exit 1
+
+      - name: Smoke test — query stats
+        run: |
+          response=$(curl -fsS https://central-gas-agent.fly.dev/stats)
+          echo "$response" | head -c 500
+          # Sanity: response should contain "total_transactions"
+          if ! echo "$response" | grep -q '"total_transactions"'; then
+            echo "❌ /stats response missing expected field"
+            exit 1
+          fi
+          echo "✅ Smoke test passed"
+
+      - name: Run migrations (if requested)
+        if: github.event.inputs.run_migration == 'true'
+        run: |
+          flyctl ssh console --app central-gas-agent --command "ls /app/scripts/migrate_*.py 2>/dev/null" || echo "no migrations"
+          echo "Run migrations manually via:"
+          echo "  flyctl ssh console --app central-gas-agent --command 'python3 /app/scripts/migrate_*.py'"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

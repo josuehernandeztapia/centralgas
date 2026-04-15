@@ -1,0 +1,88 @@
+# ============================================================
+# Central Gas Agent — .gitignore
+# REPO IS PUBLIC — be paranoid about secrets and proprietary data
+# ============================================================
+
+# --- Secrets / credentials (NEVER commit) ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.cert
+*.crt
+*.p12
+*.pfx
+secrets/
+credentials/
+*credentials*.json
+*token*.txt
+dburl.tmp
+*.dburl
+fly.secrets
+
+# --- Real customer / fiscal data (NEVER commit) ---
+# Excel reports from GasUp / NatGas — could contain client info, tax data, plates
+*.xls
+*.xlsx
+*.xlsm
+*.csv
+*.tsv
+data/
+exports/
+reports/
+output/
+uploads/
+
+# --- Python artifacts ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# --- Virtual environments ---
+venv/
+env/
+.venv/
+.env-local/
+
+# --- Test / coverage ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# --- IDE / editor ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+*.iml
+
+# --- Fly.io artifacts ---
+.fly/
+fly.toml.backup
+
+# --- Logs ---
+*.log
+logs/
+
+# --- Local DB dumps ---
+*.dump
+*.sql.gz
+*.backup
+
+# --- macOS / Linux ---
+.DS_Store
+.Spotlight-V100
+.Trashes
+ehthumbs.db

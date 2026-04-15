@@ -1,0 +1,45 @@
+# Core
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.1
+python-dotenv==1.0.1
+
+# Database
+sqlalchemy==2.0.36
+psycopg2-binary==2.9.10
+alembic==1.14.1
+
+# Data processing
+pandas==2.2.3
+numpy==2.2.1
+
+# Excel parsers (xls + xlsx)
+xlrd==2.0.1            # legacy .xls (OLE2) — required for GasUp HeadOffice exports
+openpyxl==3.1.5        # modern .xlsx (OOXML)
+python-multipart==0.0.20  # FastAPI file uploads
+
+# MQTT
+paho-mqtt==2.1.0
+
+# PLC / SCADA
+python-snap7==1.4.1
+pymodbus==3.7.4
+
+# Odoo
+# (uses stdlib xmlrpc.client — no extra dep)
+
+# LLM
+anthropic==0.43.0
+
+# WhatsApp
+twilio==9.4.0
+
+# Scheduling
+apscheduler==3.10.4
+
+# Reports
+python-docx==1.1.2
+
+# HTTP client
+httpx==0.28.1
