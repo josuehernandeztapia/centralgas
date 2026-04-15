@@ -217,13 +217,28 @@ async def upload_excel(
         )
 
         # Persist parsed transactions to Postgres (Neon).
-        # source_hash = SHA256(file content)[:16] so re-uploads dedupe via UNIQUE INDEX.
+        # NOTE: only ventas_detalladas gets persisted as transactions rows.
+        # recaudos_financiera has a different shape (no placa, no timestamp per row —
+        # it's payment records grouped by financiera + factura code). Persisting those
+        # as "transactions" would pollute the table. Phase 2 will wire a separate
+        # `financiera_recaudos` table and a join-by-factura enrichment job.
         source_hash = hashlib.sha256(contents).hexdigest()[:16]
-        persist = bulk_insert_transactions(
-            transactions=connector._transactions,
-            source_file=file.filename or "unknown",
-            source_hash=source_hash,
-        )
+        if report_type == "ventas_detalladas":
+            persist = bulk_insert_transactions(
+                transactions=connector._transactions,
+                source_file=file.filename or "unknown",
+                source_hash=source_hash,
+            )
+        else:
+            persist = {
+                "inserted": 0, "skipped": 0, "errors": 0,
+                "errors_detail": [], "skipped_invalid": 0,
+            }
+            warnings.append(
+                f"report_type='{report_type}' parsed OK ({count} rows) but NOT persisted. "
+                "Only ventas_detalladas is wired to the transactions table in Phase 1. "
+                "Recaudos/other formats will get their own table in Phase 2."
+            )
 
         if persist["errors"] > 0:
             warnings.append(

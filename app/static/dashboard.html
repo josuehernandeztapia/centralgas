@@ -75,6 +75,24 @@
       } catch { return iso; }
     };
 
+    // Title-case for medio_pago display ("EFECTIVO" → "Efectivo", "TARJETA_DEBITO" → "Tarjeta Débito")
+    const prettifyMedio = (s) => {
+      if (!s) return '—';
+      const map = {
+        'EFECTIVO': 'Efectivo', 'CREDITO': 'Crédito', 'CRÉDITO': 'Crédito',
+        'TARJETA_DEBITO': 'Tarjeta Débito', 'TARJETA_DÉBITO': 'Tarjeta Débito',
+        'TARJETA_CREDITO': 'Tarjeta Crédito', 'TARJETA_CRÉDITO': 'Tarjeta Crédito',
+        'PREPAGO': 'Prepago', 'BONOS_EDS': 'Bonos EDS', 'DESCONOCIDO': 'Desconocido',
+      };
+      return map[s.toUpperCase()] || s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+    };
+
+    // Truncate long station names to fit in chart labels
+    const truncate = (s, n = 18) => {
+      if (!s) return '—';
+      return s.length > n ? s.slice(0, n - 1) + '…' : s;
+    };
+
     const COLORS = ['#2563eb', '#0891b2', '#14b8a6', '#22c55e', '#eab308', '#f97316', '#ef4444', '#a855f7', '#ec4899', '#64748b'];
 
     // ====================================================
@@ -250,7 +268,7 @@
               <div className="text-sm text-gray-700 space-y-1">
                 {byMedio.slice(0, 3).map((m, i) => (
                   <div key={i} className="flex justify-between">
-                    <span className="truncate max-w-[120px]">{m.medio_pago}</span>
+                    <span className="truncate max-w-[120px]">{prettifyMedio(m.medio_pago)}</span>
                     <strong>{m.pct}%</strong>
                   </div>
                 ))}
@@ -258,7 +276,9 @@
             </Card>
             <Card title="Estaciones activas" className="!p-4">
               <div className="text-2xl font-bold text-gray-900">{byEstacion.length}</div>
-              <div className="text-xs text-gray-500 mt-1">{byEstacion[0]?.station_natgas || '—'} lidera</div>
+              <div className="text-xs text-gray-500 mt-1 truncate" title={byEstacion[0]?.station_natgas}>
+                {truncate(byEstacion[0]?.station_natgas, 28)} lidera
+              </div>
             </Card>
           </div>
 
@@ -297,12 +317,21 @@
               {byEstacion.length === 0 ? (
                 <div className="text-gray-400 text-sm py-8 text-center">Sin datos</div>
               ) : (
-                <ResponsiveContainer width="100%" height={260}>
-                  <BarChart data={byEstacion} layout="vertical" margin={{ top: 5, right: 20, bottom: 5, left: 110 }}>
+                <ResponsiveContainer width="100%" height={320}>
+                  <BarChart data={byEstacion} layout="vertical" margin={{ top: 5, right: 20, bottom: 5, left: 150 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                     <XAxis type="number" tick={{ fontSize: 11 }} tickFormatter={(n) => num(n, 0)} />
-                    <YAxis type="category" dataKey="station_natgas" tick={{ fontSize: 11 }} width={100} />
-                    <Tooltip formatter={(v) => [num(v, 0) + ' LEQ', 'Litros']} />
+                    <YAxis
+                      type="category"
+                      dataKey="station_natgas"
+                      tick={{ fontSize: 11 }}
+                      width={140}
+                      tickFormatter={(name) => truncate(name, 20)}
+                    />
+                    <Tooltip
+                      formatter={(v) => [num(v, 0) + ' LEQ', 'Litros']}
+                      labelFormatter={(label) => label}
+                    />
                     <Bar dataKey="litros" radius={[0, 4, 4, 0]}>
                       {byEstacion.map((e, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
                     </Bar>
@@ -497,34 +526,49 @@
           </div>
 
           {/* Histogram */}
-          <Card title="Distribución del sobreprecio por LEQ" subtitle={`${buckets.length} buckets · solo transacciones > 0`}>
+          <Card
+            title="Distribución del sobreprecio por LEQ"
+            subtitle={`${buckets.length} buckets · escala truncada en P99 ($${num(stats.p99, 2)})`}
+          >
             {buckets.length === 0 ? (
               <div className="text-gray-400 text-sm py-8 text-center">
-                Sin datos de sobreprecio aún. Los reportes tipo <code>recaudos_financiera</code> son los que alimentan esta vista.
+                Sin datos de sobreprecio aún.
               </div>
             ) : (
-              <ResponsiveContainer width="100%" height={320}>
-                <BarChart data={buckets} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                  <XAxis
-                    dataKey="lower"
-                    tick={{ fontSize: 11 }}
-                    tickFormatter={(v) => `$${num(v, 1)}`}
-                  />
-                  <YAxis tick={{ fontSize: 11 }} />
-                  <Tooltip
-                    formatter={(v, _, props) => [`${num(v)} tx (${props.payload.pct}%)`, 'Cuenta']}
-                    labelFormatter={(lo, arr) => {
-                      const row = arr[0]?.payload;
-                      if (!row) return '';
-                      return row.upper == null
-                        ? `≥ $${num(row.lower, 2)}`
-                        : `$${num(row.lower, 2)} – $${num(row.upper, 2)}`;
-                    }}
-                  />
-                  <Bar dataKey="count" fill="#f59e0b" radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
+              <>
+                <ResponsiveContainer width="100%" height={320}>
+                  <BarChart data={buckets} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                    <XAxis
+                      dataKey="lower"
+                      tick={{ fontSize: 11 }}
+                      tickFormatter={(v) => `$${num(v, 1)}`}
+                    />
+                    <YAxis tick={{ fontSize: 11 }} />
+                    <Tooltip
+                      formatter={(v, _, props) => [`${num(v)} tx (${props.payload.pct}%)`, 'Cuenta']}
+                      labelFormatter={(lo, arr) => {
+                        const row = arr[0]?.payload;
+                        if (!row) return '';
+                        return row.upper == null
+                          ? `≥ $${num(row.lower, 2)} (outliers)`
+                          : `$${num(row.lower, 2)} – $${num(row.upper, 2)}`;
+                      }}
+                    />
+                    <Bar dataKey="count" fill="#f59e0b" radius={[4, 4, 0, 0]}>
+                      {buckets.map((b, i) => (
+                        <Cell key={i} fill={b.upper == null ? '#dc2626' : '#f59e0b'} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+                {buckets.some(b => b.upper == null) && (
+                  <p className="text-xs text-gray-500 mt-2">
+                    <span className="inline-block w-2 h-2 bg-red-600 rounded-sm mr-1"></span>
+                    Bucket rojo: transacciones con sobreprecio &gt; P99 (outliers, posibles errores).
+                  </p>
+                )}
+              </>
             )}
           </Card>
 

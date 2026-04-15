@@ -215,17 +215,24 @@ def aggregate_stats() -> dict:
                             "pct": round(100.0 * n / total_count, 2),
                         })
 
-                # By day — last 30 days from max(timestamp_local)
+                # By day — last 30 days that HAVE data (not calendar-based).
+                # Avoids showing empty charts when MAX(timestamp) is recent but
+                # historical data is spread over years with gaps (dataset of NatGas
+                # covers Dec 2023 – Apr 2026 with concentrated dates, not daily).
                 cur.execute("""
-                    SELECT
-                      DATE(timestamp_local) AS day,
-                      COUNT(*),
-                      COALESCE(SUM(litros), 0),
-                      COALESCE(SUM(total_mxn), 0)
-                    FROM transactions
-                    WHERE timestamp_local IS NOT NULL
-                      AND timestamp_local >= (SELECT MAX(timestamp_local) - INTERVAL '30 days' FROM transactions)
-                    GROUP BY DATE(timestamp_local)
+                    SELECT day, cnt, litros_sum, mxn_sum
+                    FROM (
+                        SELECT
+                            DATE(timestamp_local) AS day,
+                            COUNT(*) AS cnt,
+                            COALESCE(SUM(litros), 0) AS litros_sum,
+                            COALESCE(SUM(total_mxn), 0) AS mxn_sum
+                        FROM transactions
+                        WHERE timestamp_local IS NOT NULL
+                        GROUP BY DATE(timestamp_local)
+                        ORDER BY day DESC
+                        LIMIT 30
+                    ) t
                     ORDER BY day DESC;
                 """)
                 by_day = [
@@ -320,10 +327,12 @@ def sobreprecio_distribution(buckets: int = 12) -> dict:
                 }
 
                 bucket_list: list[dict] = []
-                if n_nonzero and minv is not None and maxv is not None and float(maxv) > 0:
-                    # Build evenly spaced buckets from 0 to max (force lower bound at 0 for clarity)
-                    max_v = float(maxv)
-                    width = max_v / buckets if max_v > 0 else 1.0
+                if n_nonzero and p99 is not None and float(p99) > 0:
+                    # Cap histogram at p99 to avoid visual distortion from outliers.
+                    # The "real" sobreprecio range is $0-$14/LEQ (per Central Gas docs).
+                    # Outliers beyond p99 go into a separate overflow bucket.
+                    cap = float(p99)
+                    width = cap / buckets if cap > 0 else 1.0
 
                     cur.execute(
                         """
@@ -335,7 +344,7 @@ def sobreprecio_distribution(buckets: int = 12) -> dict:
                         GROUP BY bucket
                         ORDER BY bucket;
                         """,
-                        (max_v, buckets),
+                        (cap, buckets),
                     )
                     counts = {int(b): int(n) for b, n in cur.fetchall()}
                     total = max(1, n_nonzero)
@@ -349,11 +358,11 @@ def sobreprecio_distribution(buckets: int = 12) -> dict:
                             "count": n,
                             "pct": round(100.0 * n / total, 2),
                         })
-                    # Bucket 0 = below 0 (shouldn't happen), bucket buckets+1 = >= max
+                    # Overflow bucket (everything > p99)
                     overflow = counts.get(buckets + 1, 0)
                     if overflow:
                         bucket_list.append({
-                            "lower": round(buckets * width, 4),
+                            "lower": round(cap, 4),
                             "upper": None,
                             "count": overflow,
                             "pct": round(100.0 * overflow / total, 2),
