@@ -201,7 +201,7 @@
   </div>
 
   <script type="text/babel" data-presets="react">
-    const { useState, useEffect, useMemo, useCallback } = React;
+    const { useState, useEffect, useMemo, useCallback, useRef } = React;
     const {
       LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid,
       ResponsiveContainer, Legend, Cell,
@@ -279,7 +279,17 @@
     // API client
     // ====================================================
     async function apiGet(path) {
-      const res = await fetch(API_BASE + path, { headers: { 'Accept': 'application/json' } });
+      // credentials: 'same-origin' ensures the browser reuses the Basic auth
+      // credentials cached after the /dashboard prompt for data endpoints.
+      const res = await fetch(API_BASE + path, {
+        headers: { 'Accept': 'application/json' },
+        credentials: 'same-origin',
+      });
+      if (res.status === 401) {
+        // Force a re-prompt by reloading — clears expired Basic auth cache on some browsers.
+        window.location.reload();
+        throw new Error('401 Unauthorized');
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text().catch(() => res.statusText)}`);
       return res.json();
     }
@@ -394,6 +404,7 @@
         { id: 'resumen', label: 'Resumen' },
         { id: 'txn', label: 'Transacciones' },
         { id: 'sp', label: 'Sobreprecio' },
+        { id: 'upload', label: 'Upload' },
       ];
       return (
         <header className="sticky top-0 z-20 backdrop-blur-md bg-azul-dark/80 border-b border-cyan-brand/20">
@@ -576,6 +587,17 @@
       const applyFilters = (e) => { e.preventDefault(); setOffset(0); fetchPage(); };
       const clearFilters = () => { setFilters({ estacion: '', placa: '', date_from: '', date_to: '' }); setOffset(0); };
 
+      const exportCsv = () => {
+        // Build the same query string, hit /transactions.csv (browser re-uses Basic auth).
+        const qs = new URLSearchParams();
+        if (filters.estacion) qs.set('estacion', filters.estacion);
+        if (filters.placa) qs.set('placa', filters.placa);
+        if (filters.date_from) qs.set('date_from', filters.date_from);
+        if (filters.date_to) qs.set('date_to', filters.date_to);
+        const url = API_BASE + '/transactions.csv' + (qs.toString() ? '?' + qs.toString() : '');
+        window.location.href = url;
+      };
+
       const page = Math.floor(offset / limit) + 1;
       const totalPages = data ? Math.ceil((data.total || 0) / limit) : 0;
 
@@ -607,6 +629,17 @@
           <Card
             title="Transacciones"
             subtitle={data ? `${num(data.total || 0)} resultados · página ${page} de ${totalPages || 1}` : ''}
+            titleAction={
+              <button
+                type="button"
+                onClick={exportCsv}
+                disabled={!data || !data.total}
+                title="Exportar el resultado filtrado a CSV"
+                className="text-[11px] font-semibold uppercase tracking-wider bg-cyan-brand/10 hover:bg-cyan-brand/20 border border-cyan-brand/40 text-cyan-300 px-3 py-1.5 rounded transition disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                ↓ Export CSV
+              </button>
+            }
           >
             {loading && <LoadingBlock />}
             {err && <ErrorBlock error={err} />}
@@ -758,6 +791,188 @@
     }
 
     // ====================================================
+    // Upload tab (HU-DASH-2.3)
+    // Drag-drop .xls/.xlsx → POST /upload-excel
+    // ====================================================
+    function UploadTab() {
+      const [file, setFile] = useState(null);
+      const [reportType, setReportType] = useState('ventas_detalladas');
+      const [estacionId, setEstacionId] = useState('');
+      const [dragOver, setDragOver] = useState(false);
+      const [uploading, setUploading] = useState(false);
+      const [result, setResult] = useState(null);
+      const [err, setErr] = useState(null);
+      const inputRef = useRef(null);
+
+      const ALLOWED = ['.xls', '.xlsx'];
+
+      const pickFile = (f) => {
+        if (!f) return;
+        const ext = (f.name.match(/\.[^.]+$/) || [''])[0].toLowerCase();
+        if (!ALLOWED.includes(ext)) {
+          setErr(new Error(`Solo se aceptan ${ALLOWED.join(' / ')} — recibido: ${ext || '(sin extensión)'}`));
+          return;
+        }
+        if (f.size > 50 * 1024 * 1024) {
+          setErr(new Error(`Archivo supera 50 MB (${(f.size / 1024 / 1024).toFixed(1)} MB)`));
+          return;
+        }
+        setErr(null);
+        setResult(null);
+        setFile(f);
+      };
+
+      const onDrop = (e) => {
+        e.preventDefault();
+        setDragOver(false);
+        if (e.dataTransfer?.files?.[0]) pickFile(e.dataTransfer.files[0]);
+      };
+
+      const submit = async (e) => {
+        e.preventDefault();
+        if (!file) return;
+        setUploading(true); setErr(null); setResult(null);
+        try {
+          const fd = new FormData();
+          fd.append('file', file);
+          fd.append('report_type', reportType);
+          if (estacionId) fd.append('estacion_id', estacionId);
+          const res = await fetch(API_BASE + '/upload-excel', {
+            method: 'POST', body: fd, credentials: 'same-origin',
+          });
+          if (res.status === 401) { window.location.reload(); return; }
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+          setResult(data);
+          setFile(null);
+          if (inputRef.current) inputRef.current.value = '';
+        } catch (e) { setErr(e); }
+        finally { setUploading(false); }
+      };
+
+      const inputCls = 'bg-azul-dark/50 border border-cyan-brand/20 text-white placeholder-white/30 px-3 py-2 rounded text-sm focus:border-cyan-brand/60 focus:outline-none';
+      const fmtMB = (b) => (b / 1024 / 1024).toFixed(2);
+
+      return (
+        <div className="space-y-4">
+          <Card title="Cargar reporte GasUp" subtitle="Excel (.xls / .xlsx) — max 50 MB">
+            <form onSubmit={submit} className="space-y-4">
+              <div
+                onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={onDrop}
+                onClick={() => inputRef.current?.click()}
+                className={`border-2 border-dashed rounded-lg p-10 text-center cursor-pointer transition ${
+                  dragOver
+                    ? 'border-cyan-brand bg-cyan-brand/10'
+                    : 'border-white/20 hover:border-cyan-brand/50 hover:bg-white/5'
+                }`}
+              >
+                <input
+                  ref={inputRef}
+                  type="file"
+                  accept=".xls,.xlsx"
+                  className="hidden"
+                  onChange={(e) => pickFile(e.target.files?.[0])}
+                />
+                {file ? (
+                  <div>
+                    <div className="font-display text-lg font-semibold text-white">{file.name}</div>
+                    <div className="text-xs text-white/50 mt-1">{fmtMB(file.size)} MB · {file.type || 'Excel'}</div>
+                    <div className="text-[11px] text-cyan-300 mt-2 uppercase tracking-wider">Click para cambiar</div>
+                  </div>
+                ) : (
+                  <div>
+                    <div className="text-4xl text-white/30 mb-2">↑</div>
+                    <div className="font-display text-lg font-semibold text-white">Arrastra un archivo</div>
+                    <div className="text-xs text-white/50 mt-1">o click para seleccionar · .xls / .xlsx</div>
+                  </div>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[10px] uppercase tracking-wider text-white/50 mb-1 font-semibold">Tipo de reporte</label>
+                  <select className={inputCls + ' w-full'} value={reportType} onChange={(e) => setReportType(e.target.value)}>
+                    <option value="ventas_detalladas">ventas_detalladas</option>
+                    <option value="recaudos_financiera">recaudos_financiera</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[10px] uppercase tracking-wider text-white/50 mb-1 font-semibold">Estación (opcional)</label>
+                  <select className={inputCls + ' w-full'} value={estacionId} onChange={(e) => setEstacionId(e.target.value)}>
+                    <option value="">(auto-detectar)</option>
+                    <option value="ECG-01">ECG-01 Nacozari</option>
+                    <option value="ECG-02">ECG-02 Ojo Caliente</option>
+                    <option value="ECG-03">ECG-03 Peñuelas</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <button
+                  type="submit"
+                  disabled={!file || uploading}
+                  className="bg-gradient-to-br from-cyan-brand to-verde-brand hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed text-azul-dark text-sm font-semibold py-2 px-5 rounded transition"
+                >
+                  {uploading ? 'Procesando…' : 'Subir y parsear'}
+                </button>
+                {file && !uploading && (
+                  <button
+                    type="button"
+                    onClick={() => { setFile(null); if (inputRef.current) inputRef.current.value = ''; }}
+                    className="text-sm text-white/60 hover:text-white/90 transition"
+                  >
+                    Cancelar
+                  </button>
+                )}
+              </div>
+            </form>
+          </Card>
+
+          {err && (
+            <Card title="Error">
+              <div className="text-sm text-red-300 font-mono">{String(err.message || err)}</div>
+            </Card>
+          )}
+
+          {result && (
+            <Card title="Resultado" subtitle={result.filename}>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                <div className="border-l-2 border-cyan-brand pl-3">
+                  <div className="text-[10px] uppercase text-white/50 tracking-wider">Formato</div>
+                  <div className="font-display text-sm font-semibold text-white mt-1">{result.detected_format}</div>
+                </div>
+                <div className="border-l-2 border-cyan-brand pl-3">
+                  <div className="text-[10px] uppercase text-white/50 tracking-wider">Parseadas</div>
+                  <div className="font-display text-2xl font-semibold text-white mt-1 font-tabular">{num(result.rows_parsed)}</div>
+                </div>
+                <div className="border-l-2 border-emerald-400 pl-3">
+                  <div className="text-[10px] uppercase text-white/50 tracking-wider">Insertadas</div>
+                  <div className="font-display text-2xl font-semibold text-emerald-300 mt-1 font-tabular">{num(result.rows_inserted)}</div>
+                </div>
+                <div className="border-l-2 border-amber-400 pl-3">
+                  <div className="text-[10px] uppercase text-white/50 tracking-wider">Omitidas</div>
+                  <div className="font-display text-2xl font-semibold text-amber-300 mt-1 font-tabular">{num(result.rows_skipped)}</div>
+                </div>
+              </div>
+              {result.warnings && result.warnings.length > 0 && (
+                <div className="mt-4 pt-4 border-t border-white/10">
+                  <div className="text-[10px] uppercase text-amber-300 tracking-wider mb-2 font-semibold">Warnings</div>
+                  <ul className="space-y-1 text-xs text-white/70">
+                    {result.warnings.map((w, i) => (
+                      <li key={i} className="pl-3 border-l border-amber-400/40">{w}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </Card>
+          )}
+        </div>
+      );
+    }
+
+    // ====================================================
     // App
     // ====================================================
     function App() {
@@ -773,6 +988,7 @@
             {tab === 'resumen' && <ResumenTab />}
             {tab === 'txn' && <TxnTab />}
             {tab === 'sp' && <SobreprecioTab />}
+            {tab === 'upload' && <UploadTab />}
           </main>
           <footer className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 text-[11px] text-white/30 text-center tracking-wider uppercase font-display">
             {version && <span>Central Gas Agent {version} · </span>}

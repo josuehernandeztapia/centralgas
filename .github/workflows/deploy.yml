@@ -51,16 +51,31 @@ jobs:
           echo "❌ App did not become healthy"
           exit 1
 
-      - name: Smoke test — query stats
+      - name: Smoke test — query stats (requires auth)
+        env:
+          DASH_USER: ${{ secrets.DASHBOARD_USER }}
+          DASH_PASS: ${{ secrets.DASHBOARD_PASSWORD }}
         run: |
-          response=$(curl -fsS https://central-gas-agent.fly.dev/stats)
+          # /stats requires HTTP Basic auth (HU-DASH-X.1).
+          # Verify 401 without creds, 200 + payload with creds.
+          code=$(curl -s -o /dev/null -w '%{http_code}' https://central-gas-agent.fly.dev/stats)
+          if [ "$code" != "401" ]; then
+            echo "❌ Expected 401 without creds, got $code"
+            exit 1
+          fi
+          echo "✅ Auth gate works (/stats returns 401 without creds)"
+
+          if [ -z "$DASH_USER" ] || [ -z "$DASH_PASS" ]; then
+            echo "⚠️  DASHBOARD_USER/PASSWORD not set in GH secrets — skipping authenticated check"
+            exit 0
+          fi
+          response=$(curl -fsS -u "$DASH_USER:$DASH_PASS" https://central-gas-agent.fly.dev/stats)
           echo "$response" | head -c 500
-          # Sanity: response should contain "total_transactions"
           if ! echo "$response" | grep -q '"total_transactions"'; then
             echo "❌ /stats response missing expected field"
             exit 1
           fi
-          echo "✅ Smoke test passed"
+          echo "✅ Authenticated smoke test passed"
 
       - name: Run migrations (if requested)
         if: github.event.inputs.run_migration == 'true'

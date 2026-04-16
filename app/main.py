@@ -25,10 +25,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+from app.auth import require_auth
 
 # Configure logging
 logging.basicConfig(
@@ -55,7 +57,7 @@ if _STATIC_DIR.exists():
 
 
 @app.get("/dashboard", include_in_schema=False)
-async def dashboard():
+async def dashboard(_: str = Depends(require_auth)):
     """Serve the single-file React dashboard (app/static/dashboard.html)."""
     dashboard_path = _STATIC_DIR / "dashboard.html"
     if not dashboard_path.exists():
@@ -139,6 +141,7 @@ async def upload_excel(
             "Use 'CONDUCTORES,CENTRAL GAS' to filter to CMU/CG only when in production."
         ),
     ),
+    _: str = Depends(require_auth),
 ) -> UploadResponse:
     """
     Receive a manual upload of a GasUp report and feed it into the connector.
@@ -292,6 +295,7 @@ async def get_transactions(
     placa: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    _: str = Depends(require_auth),
 ):
     """
     List transactions from Postgres with pagination + filters.
@@ -316,7 +320,7 @@ async def get_transactions(
 
 
 @app.get("/stats")
-async def quick_stats():
+async def quick_stats(_: str = Depends(require_auth)):
     """Aggregate KPIs across the transactions table."""
     from app.db.queries import aggregate_stats
     try:
@@ -326,8 +330,72 @@ async def quick_stats():
         raise HTTPException(status_code=500, detail=f"query failed: {e}")
 
 
+@app.get("/transactions.csv")
+async def export_transactions_csv(
+    estacion: Optional[str] = None,
+    placa: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    limit: int = 100000,
+    _: str = Depends(require_auth),
+):
+    """
+    Stream transactions as CSV (HU-DASH-2.4).
+
+    Respects the same filters as /transactions. Default cap 100k rows to
+    avoid blowing up memory on very wide queries.
+    """
+    import csv
+    import io
+    from app.db.queries import list_transactions
+
+    try:
+        data = list_transactions(
+            limit=min(limit, 100000), offset=0,
+            estacion=estacion, placa=placa,
+            date_from=date_from, date_to=date_to,
+        )
+    except Exception as e:
+        logger.exception("export csv failed")
+        raise HTTPException(status_code=500, detail=f"query failed: {e}")
+
+    rows = data.get("rows", [])
+    cols = [
+        "id", "source_file", "station_natgas", "timestamp_local", "placa",
+        "litros", "pvp", "total_mxn", "recaudo_valor", "recaudo_pagado",
+        "medio_pago", "kg", "nm3", "ingreso_neto", "iva",
+    ]
+
+    def _gen():
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
+        writer.writeheader()
+        yield buf.getvalue()
+        buf.seek(0); buf.truncate(0)
+
+        for r in rows:
+            writer.writerow({c: r.get(c, "") for c in cols})
+            yield buf.getvalue()
+            buf.seek(0); buf.truncate(0)
+
+    fname_parts = ["transactions"]
+    if date_from: fname_parts.append(f"from-{date_from}")
+    if date_to:   fname_parts.append(f"to-{date_to}")
+    if estacion:  fname_parts.append(estacion.replace(" ", "_"))
+    fname = "_".join(fname_parts) + ".csv"
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
 @app.get("/sobreprecio/distribution")
-async def sobreprecio_distribution_endpoint(buckets: int = 12):
+async def sobreprecio_distribution_endpoint(
+    buckets: int = 12,
+    _: str = Depends(require_auth),
+):
     """
     Histogram + descriptive stats for the per-LEQ surcharge field
     (recaudo_pagado column, which holds tx.sobreprecio from the parser).
