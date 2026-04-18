@@ -962,42 +962,47 @@ def compute_health_scores() -> dict:
     try:
         with conn:
             with conn.cursor() as cur:
-                # Get all placas with at least 1 transaction in last 180 days
+                # Use MAX(timestamp_local) as reference date instead of NOW()
+                # so the engine works with historical data (e.g. Dec 2023 dataset)
                 cur.execute("""
-                    WITH placa_stats AS (
+                    WITH ref AS (
+                        SELECT MAX(timestamp_local) AS ref_date FROM transactions
+                    ),
+                    placa_stats AS (
                         SELECT
                             t.placa,
-                            -- Frequency: cargas in last 30d
-                            COUNT(*) FILTER (WHERE t.timestamp_local >= NOW() - INTERVAL '30 days') AS cargas_30d,
+                            -- Frequency: cargas in last 30d relative to ref_date
+                            COUNT(*) FILTER (WHERE t.timestamp_local >= r.ref_date - INTERVAL '30 days') AS cargas_30d,
                             -- Historical avg cargas per 30d (over last 180d)
                             COUNT(*)::numeric / GREATEST(
-                                EXTRACT(DAY FROM NOW() - MIN(t.timestamp_local)) / 30.0, 1
+                                EXTRACT(DAY FROM r.ref_date - MIN(t.timestamp_local)) / 30.0, 1
                             ) AS avg_cargas_30d,
-                            -- Volume: avg litros last 5 cargas vs historical
+                            -- Volume: avg litros all cargas in window
                             AVG(t.litros) AS avg_litros_all,
-                            -- Days since last carga
-                            EXTRACT(DAY FROM NOW() - MAX(t.timestamp_local))::int AS dias_sin_cargar,
+                            -- Days since last carga (relative to ref_date)
+                            EXTRACT(DAY FROM r.ref_date - MAX(t.timestamp_local))::int AS dias_sin_cargar,
                             -- Total cargas in 90d
-                            COUNT(*) FILTER (WHERE t.timestamp_local >= NOW() - INTERVAL '90 days') AS cargas_90d,
-                            COALESCE(SUM(t.litros) FILTER (WHERE t.timestamp_local >= NOW() - INTERVAL '90 days'), 0) AS litros_90d,
-                            -- Recaudo health (CMU): has overdue? (recaudo_pagado > 0 means active in CMU)
+                            COUNT(*) FILTER (WHERE t.timestamp_local >= r.ref_date - INTERVAL '90 days') AS cargas_90d,
+                            COALESCE(SUM(t.litros) FILTER (WHERE t.timestamp_local >= r.ref_date - INTERVAL '90 days'), 0) AS litros_90d,
+                            -- Recaudo health (CMU)
                             COUNT(*) FILTER (WHERE t.recaudo_pagado > 0) AS cargas_cmu,
-                            -- Station loyalty: % at most-frequent station
+                            -- Station loyalty
                             MODE() WITHIN GROUP (ORDER BY t.station_natgas) AS estacion_frecuente,
                             COUNT(*) AS total_cargas
                         FROM transactions t
-                        WHERE t.timestamp_local >= NOW() - INTERVAL '180 days'
-                        GROUP BY t.placa
+                        CROSS JOIN ref r
+                        WHERE t.timestamp_local >= r.ref_date - INTERVAL '180 days'
+                        GROUP BY t.placa, r.ref_date
                     ),
                     with_loyalty AS (
                         SELECT
                             ps.*,
-                            -- Count cargas at most frequent station
                             (
                                 SELECT COUNT(*) FROM transactions t2
+                                CROSS JOIN ref r2
                                 WHERE t2.placa = ps.placa
                                   AND t2.station_natgas = ps.estacion_frecuente
-                                  AND t2.timestamp_local >= NOW() - INTERVAL '180 days'
+                                  AND t2.timestamp_local >= r2.ref_date - INTERVAL '180 days'
                             )::numeric / GREATEST(ps.total_cargas, 1) AS loyalty_pct
                         FROM placa_stats ps
                     )
@@ -1025,7 +1030,7 @@ def compute_health_scores() -> dict:
                             SELECT placa, litros,
                                    ROW_NUMBER() OVER (PARTITION BY placa ORDER BY timestamp_local DESC) AS rn
                             FROM transactions
-                            WHERE timestamp_local >= NOW() - INTERVAL '180 days'
+                            WHERE timestamp_local >= (SELECT MAX(timestamp_local) - INTERVAL '180 days' FROM transactions)
                         ) sub WHERE rn <= 5
                         GROUP BY placa
                     ) t
