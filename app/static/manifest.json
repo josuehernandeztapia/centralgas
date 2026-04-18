@@ -1,0 +1,18 @@
+{
+  "name": "Central Gas Dashboard",
+  "short_name": "Central Gas",
+  "description": "Dashboard operativo Central Gas — Agente IA",
+  "start_url": "/dashboard",
+  "display": "standalone",
+  "background_color": "#081F3A",
+  "theme_color": "#0D2B4E",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect fill='%230D2B4E' width='100' height='100' rx='20'/%3E%3Ccircle cx='50' cy='50' r='14' fill='rgba(0,174,239,0.15)'/%3E%3Ccircle cx='50' cy='50' r='7' fill='%2300AEEF'/%3E%3Ccircle cx='50' cy='50' r='3.5' fill='white'/%3E%3Cline x1='50' y1='50' x2='80' y2='50' stroke='%2300AEEF' stroke-width='2' stroke-dasharray='5 3'/%3E%3Cline x1='50' y1='50' x2='20' y2='50' stroke='%2300C48C' stroke-width='2' stroke-dasharray='5 3'/%3E%3Cline x1='50' y1='50' x2='70' y2='22' stroke='%2300AEEF' stroke-width='2' stroke-dasharray='5 3'/%3E%3Cline x1='50' y1='50' x2='70' y2='78' stroke='%2300C48C' stroke-width='2' stroke-dasharray='5 3'/%3E%3Ccircle cx='80' cy='50' r='5' fill='white' opacity='0.3'/%3E%3Ccircle cx='20' cy='50' r='4' fill='%2300C48C' opacity='0.7'/%3E%3Ccircle cx='70' cy='22' r='4' fill='%2300AEEF' opacity='0.7'/%3E%3Ccircle cx='70' cy='78' r='4' fill='%2300AEEF' opacity='0.7'/%3E%3C/svg%3E",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

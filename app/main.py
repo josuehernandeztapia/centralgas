@@ -502,6 +502,80 @@ async def api_recaudos_csv(
 
 
 # ============================================================
+# /api/stations/:name — station drill-down (HU-DASH-2.1)
+# ============================================================
+
+@app.get("/api/stations/{station_name}")
+async def api_station_detail(
+    station_name: str,
+    _: str = Depends(require_auth),
+):
+    """Drill-down for a single station: monthly volume, top placas, heatmap."""
+    from app.db.queries import station_detail
+    try:
+        return station_detail(station_name)
+    except Exception as e:
+        logger.exception("station_detail failed")
+        raise HTTPException(status_code=500, detail=f"query failed: {e}")
+
+
+# ============================================================
+# /api/placas/:placa — placa drill-down (HU-DASH-2.2)
+# ============================================================
+
+@app.get("/api/placas/{placa}")
+async def api_placa_detail(
+    placa: str,
+    _: str = Depends(require_auth),
+):
+    """Drill-down for a single placa: lifetime stats, monthly trend, stations, recent txns."""
+    from app.db.queries import placa_detail
+    try:
+        return placa_detail(placa)
+    except Exception as e:
+        logger.exception("placa_detail failed")
+        raise HTTPException(status_code=500, detail=f"query failed: {e}")
+
+
+# ============================================================
+# /api/search — global search (HU-DASH-2.5)
+# ============================================================
+
+@app.get("/api/search")
+async def api_search(
+    q: str = "",
+    limit: int = 20,
+    _: str = Depends(require_auth),
+):
+    """Search placas and stations by query string."""
+    from app.db.queries import global_search
+    try:
+        return global_search(q, limit=min(limit, 50))
+    except Exception as e:
+        logger.exception("global_search failed")
+        raise HTTPException(status_code=500, detail=f"query failed: {e}")
+
+
+# ============================================================
+# /api/retention — inactive placas alerts (HU-DASH-3.3)
+# ============================================================
+
+@app.get("/api/retention")
+async def api_retention(
+    days: int = 7,
+    min_cargas: int = 3,
+    _: str = Depends(require_auth),
+):
+    """Placas that were active but haven't refueled in N days."""
+    from app.db.queries import retention_alerts
+    try:
+        return retention_alerts(days_inactive=days, min_cargas=min_cargas)
+    except Exception as e:
+        logger.exception("retention_alerts failed")
+        raise HTTPException(status_code=500, detail=f"query failed: {e}")
+
+
+# ============================================================
 # Phase 2 placeholder endpoints (return 501 for now)
 # ============================================================
 

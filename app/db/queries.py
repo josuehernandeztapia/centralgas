@@ -215,6 +215,29 @@ def aggregate_stats() -> dict:
                             "pct": round(100.0 * n / total_count, 2),
                         })
 
+                # By segmento (HU-DASH-3.6) — join with clients for vehicle type
+                cur.execute("""
+                    SELECT
+                        COALESCE(c.segmento, 'SIN_DATOS') AS segmento,
+                        COUNT(*) AS n,
+                        COALESCE(SUM(t.litros), 0) AS litros,
+                        COALESCE(SUM(t.total_mxn), 0) AS mxn
+                    FROM transactions t
+                    LEFT JOIN clients c ON c.placa = t.placa
+                    GROUP BY COALESCE(c.segmento, 'SIN_DATOS')
+                    ORDER BY n DESC;
+                """)
+                by_segmento = []
+                if total_count > 0:
+                    for seg, n, litros, mxn_val in cur.fetchall():
+                        by_segmento.append({
+                            "segmento": seg,
+                            "count": n,
+                            "pct": round(100.0 * n / total_count, 1),
+                            "litros": float(litros),
+                            "mxn": float(mxn_val),
+                        })
+
                 # By day — last 30 days that HAVE data (not calendar-based).
                 # Avoids showing empty charts when MAX(timestamp) is recent but
                 # historical data is spread over years with gaps (dataset of NatGas
@@ -254,6 +277,7 @@ def aggregate_stats() -> dict:
         "date_range": date_range,
         "by_estacion": by_estacion,
         "by_medio_pago": by_medio_pago,
+        "by_segmento": by_segmento,
         "by_day": by_day,
     }
 
@@ -514,5 +538,377 @@ def list_recaudos(
         "kpis": kpis,
         "by_placa": by_placa,
         "by_day": by_day,
+        "rows": rows,
+    }
+
+
+# ============================================================
+# /api/stations/:name — station drill-down (HU-DASH-2.1)
+# ============================================================
+
+def station_detail(station_name: str) -> dict:
+    """
+    Drill-down for a single station: volume by month, top placas,
+    hourly heatmap, and recent transactions.
+    """
+    conn = _get_conn()
+    try:
+        with conn.cursor() as cur:
+            # KPIs for this station
+            cur.execute("""
+                SELECT
+                    COUNT(*) AS total_txn,
+                    COALESCE(SUM(litros), 0) AS total_litros,
+                    COALESCE(SUM(total_mxn), 0) AS total_mxn,
+                    COALESCE(SUM(recaudo_valor), 0) AS total_recaudo,
+                    COUNT(DISTINCT placa) AS placas_unicas,
+                    MIN(timestamp_local) AS primera_txn,
+                    MAX(timestamp_local) AS ultima_txn
+                FROM transactions
+                WHERE station_natgas = %s
+            """, (station_name,))
+            row = cur.fetchone()
+            kpis = {
+                "total_txn": row[0],
+                "total_litros": float(row[1]),
+                "total_mxn": float(row[2]),
+                "total_recaudo": float(row[3]),
+                "placas_unicas": row[4],
+                "primera_txn": _serialize(row[5]),
+                "ultima_txn": _serialize(row[6]),
+            }
+
+            # Volume by month (last 12 months with data)
+            cur.execute("""
+                SELECT
+                    TO_CHAR(timestamp_local, 'YYYY-MM') AS mes,
+                    COUNT(*) AS cargas,
+                    COALESCE(SUM(litros), 0) AS litros,
+                    COALESCE(SUM(total_mxn), 0) AS mxn
+                FROM transactions
+                WHERE station_natgas = %s AND timestamp_local IS NOT NULL
+                GROUP BY TO_CHAR(timestamp_local, 'YYYY-MM')
+                ORDER BY mes DESC
+                LIMIT 12
+            """, (station_name,))
+            by_month = [
+                {"mes": r[0], "cargas": r[1], "litros": float(r[2]), "mxn": float(r[3])}
+                for r in cur.fetchall()
+            ]
+
+            # Top 20 placas by volume
+            cur.execute("""
+                SELECT
+                    t.placa,
+                    c.nombre,
+                    COUNT(*) AS cargas,
+                    COALESCE(SUM(t.litros), 0) AS litros,
+                    COALESCE(SUM(t.total_mxn), 0) AS mxn,
+                    MAX(t.timestamp_local) AS ultima_carga
+                FROM transactions t
+                LEFT JOIN clients c ON c.placa = t.placa
+                WHERE t.station_natgas = %s
+                GROUP BY t.placa, c.nombre
+                ORDER BY litros DESC
+                LIMIT 20
+            """, (station_name,))
+            top_placas = [
+                {
+                    "placa": r[0], "nombre": r[1], "cargas": r[2],
+                    "litros": float(r[3]), "mxn": float(r[4]),
+                    "ultima_carga": _serialize(r[5]),
+                }
+                for r in cur.fetchall()
+            ]
+
+            # Hourly heatmap (day_of_week × hour → count)
+            cur.execute("""
+                SELECT
+                    EXTRACT(DOW FROM timestamp_local)::int AS dow,
+                    EXTRACT(HOUR FROM timestamp_local)::int AS hora,
+                    COUNT(*) AS n
+                FROM transactions
+                WHERE station_natgas = %s AND timestamp_local IS NOT NULL
+                GROUP BY dow, hora
+                ORDER BY dow, hora
+            """, (station_name,))
+            heatmap = [
+                {"dow": r[0], "hora": r[1], "n": r[2]}
+                for r in cur.fetchall()
+            ]
+
+            # Medio de pago breakdown
+            cur.execute("""
+                SELECT medio_pago, COUNT(*) AS n
+                FROM transactions
+                WHERE station_natgas = %s
+                GROUP BY medio_pago
+                ORDER BY n DESC
+            """, (station_name,))
+            total_txn = max(1, kpis["total_txn"])
+            by_medio = [
+                {"medio_pago": r[0] or "(unknown)", "count": r[1], "pct": round(100.0 * r[1] / total_txn, 1)}
+                for r in cur.fetchall()
+            ]
+
+    finally:
+        conn.close()
+
+    return {
+        "station_name": station_name,
+        "kpis": kpis,
+        "by_month": list(reversed(by_month)),
+        "top_placas": top_placas,
+        "heatmap": heatmap,
+        "by_medio": by_medio,
+    }
+
+
+# ============================================================
+# /api/placas/:placa — placa drill-down (HU-DASH-2.2)
+# ============================================================
+
+def placa_detail(placa: str) -> dict:
+    """
+    Drill-down for a single placa: lifetime stats, monthly trend,
+    stations visited, recent transactions, and retention info.
+    """
+    placa = placa.upper().strip()
+    conn = _get_conn()
+    try:
+        with conn.cursor() as cur:
+            # Client info
+            cur.execute("""
+                SELECT nombre, telefono, segmento, modelo_vehiculo,
+                       fecha_conversion, consumo_prom_lt, eds_principal, notas
+                FROM clients WHERE placa = %s
+            """, (placa,))
+            client_row = cur.fetchone()
+            client = None
+            if client_row:
+                client = {
+                    "nombre": client_row[0], "telefono": client_row[1],
+                    "segmento": client_row[2], "modelo": client_row[3],
+                    "fecha_conversion": _serialize(client_row[4]),
+                    "consumo_prom_lt": float(client_row[5]) if client_row[5] else None,
+                    "eds_principal": client_row[6], "notas": client_row[7],
+                }
+
+            # Lifetime KPIs
+            cur.execute("""
+                SELECT
+                    COUNT(*) AS total_cargas,
+                    COALESCE(SUM(litros), 0) AS total_litros,
+                    COALESCE(SUM(total_mxn), 0) AS total_mxn,
+                    COALESCE(SUM(recaudo_valor), 0) AS total_recaudo,
+                    COALESCE(AVG(litros), 0) AS prom_litros,
+                    MIN(timestamp_local) AS primera_carga,
+                    MAX(timestamp_local) AS ultima_carga
+                FROM transactions WHERE placa = %s
+            """, (placa,))
+            row = cur.fetchone()
+            kpis = {
+                "total_cargas": row[0],
+                "total_litros": float(row[1]),
+                "total_mxn": float(row[2]),
+                "total_recaudo": float(row[3]),
+                "prom_litros": float(row[4]),
+                "primera_carga": _serialize(row[5]),
+                "ultima_carga": _serialize(row[6]),
+            }
+            # Days since last refueling
+            if row[6]:
+                from datetime import datetime as dt, timezone as tz
+                now = dt.now(tz.utc)
+                last = row[6].replace(tzinfo=tz.utc) if row[6].tzinfo is None else row[6]
+                kpis["dias_sin_cargar"] = (now - last).days
+            else:
+                kpis["dias_sin_cargar"] = None
+
+            # Monthly trend (last 12)
+            cur.execute("""
+                SELECT
+                    TO_CHAR(timestamp_local, 'YYYY-MM') AS mes,
+                    COUNT(*) AS cargas,
+                    COALESCE(SUM(litros), 0) AS litros,
+                    COALESCE(SUM(total_mxn), 0) AS mxn
+                FROM transactions
+                WHERE placa = %s AND timestamp_local IS NOT NULL
+                GROUP BY TO_CHAR(timestamp_local, 'YYYY-MM')
+                ORDER BY mes DESC LIMIT 12
+            """, (placa,))
+            by_month = [
+                {"mes": r[0], "cargas": r[1], "litros": float(r[2]), "mxn": float(r[3])}
+                for r in cur.fetchall()
+            ]
+
+            # Stations visited
+            cur.execute("""
+                SELECT
+                    station_natgas,
+                    COUNT(*) AS cargas,
+                    COALESCE(SUM(litros), 0) AS litros
+                FROM transactions WHERE placa = %s
+                GROUP BY station_natgas
+                ORDER BY cargas DESC
+            """, (placa,))
+            stations = [
+                {"station": r[0] or "—", "cargas": r[1], "litros": float(r[2])}
+                for r in cur.fetchall()
+            ]
+
+            # Recent transactions (last 50)
+            cur.execute("""
+                SELECT
+                    timestamp_local, station_natgas, litros,
+                    pvp, total_mxn, recaudo_pagado, recaudo_valor, medio_pago
+                FROM transactions
+                WHERE placa = %s
+                ORDER BY timestamp_local DESC NULLS LAST
+                LIMIT 50
+            """, (placa,))
+            cols = ["fecha", "estacion", "litros", "pvp", "total_mxn",
+                    "tarifa_recaudo", "recaudo_total", "medio_pago"]
+            recent = [
+                {c: _serialize(v) for c, v in zip(cols, r)}
+                for r in cur.fetchall()
+            ]
+
+    finally:
+        conn.close()
+
+    return {
+        "placa": placa,
+        "client": client,
+        "kpis": kpis,
+        "by_month": list(reversed(by_month)),
+        "stations": stations,
+        "recent": recent,
+    }
+
+
+# ============================================================
+# /api/search — global search (HU-DASH-2.5)
+# ============================================================
+
+def global_search(q: str, limit: int = 20) -> dict:
+    """
+    Search placas and stations matching query string.
+    Returns grouped results by type.
+    """
+    q = q.strip()
+    if not q or len(q) < 2:
+        return {"results": [], "query": q}
+
+    conn = _get_conn()
+    try:
+        with conn.cursor() as cur:
+            results = []
+            pattern = f"%{q.upper()}%"
+
+            # Search placas
+            cur.execute("""
+                SELECT DISTINCT t.placa, c.nombre, COUNT(*) AS cargas
+                FROM transactions t
+                LEFT JOIN clients c ON c.placa = t.placa
+                WHERE t.placa LIKE %s OR UPPER(c.nombre) LIKE %s
+                GROUP BY t.placa, c.nombre
+                ORDER BY cargas DESC
+                LIMIT %s
+            """, (pattern, pattern, limit))
+            for r in cur.fetchall():
+                results.append({
+                    "type": "placa",
+                    "id": r[0],
+                    "label": r[0],
+                    "detail": r[1] or "",
+                    "meta": f"{r[2]} cargas",
+                })
+
+            # Search stations
+            cur.execute("""
+                SELECT station_natgas, COUNT(*) AS cargas,
+                       COALESCE(SUM(litros), 0) AS litros
+                FROM transactions
+                WHERE UPPER(station_natgas) LIKE %s
+                GROUP BY station_natgas
+                ORDER BY cargas DESC
+                LIMIT %s
+            """, (pattern, limit))
+            for r in cur.fetchall():
+                results.append({
+                    "type": "estacion",
+                    "id": r[0],
+                    "label": r[0],
+                    "detail": f"{r[1]} txn, {float(r[2]):,.0f} LEQ",
+                    "meta": "",
+                })
+
+    finally:
+        conn.close()
+
+    return {"results": results, "query": q}
+
+
+# ============================================================
+# /api/retention — placas inactivas (HU-DASH-3.3)
+# ============================================================
+
+def retention_alerts(days_inactive: int = 7, min_cargas: int = 3) -> dict:
+    """
+    Placas activas (at least min_cargas in last 90 days) that haven't
+    refueled in the last days_inactive days. Prioritized by historical
+    monthly volume.
+    """
+    conn = _get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                WITH active AS (
+                    SELECT
+                        t.placa,
+                        c.nombre,
+                        c.telefono,
+                        c.segmento,
+                        COUNT(*) AS cargas_90d,
+                        COALESCE(SUM(t.litros), 0) AS litros_90d,
+                        COALESCE(AVG(t.litros), 0) AS prom_litros,
+                        MAX(t.timestamp_local) AS ultima_carga,
+                        MODE() WITHIN GROUP (ORDER BY t.station_natgas) AS estacion_frecuente
+                    FROM transactions t
+                    LEFT JOIN clients c ON c.placa = t.placa
+                    WHERE t.timestamp_local >= NOW() - INTERVAL '90 days'
+                    GROUP BY t.placa, c.nombre, c.telefono, c.segmento
+                    HAVING COUNT(*) >= %(min_cargas)s
+                )
+                SELECT
+                    placa, nombre, telefono, segmento,
+                    cargas_90d, litros_90d, prom_litros,
+                    ultima_carga, estacion_frecuente,
+                    EXTRACT(DAY FROM NOW() - ultima_carga)::int AS dias_sin_cargar
+                FROM active
+                WHERE EXTRACT(DAY FROM NOW() - ultima_carga) >= %(days_inactive)s
+                ORDER BY litros_90d DESC
+                LIMIT 200
+            """, {"min_cargas": min_cargas, "days_inactive": days_inactive})
+
+            cols = [d[0] for d in cur.description]
+            rows = []
+            for r in cur.fetchall():
+                row = {c: _serialize(v) for c, v in zip(cols, r)}
+                rows.append(row)
+
+            # Summary KPIs
+            total_at_risk = len(rows)
+            litros_at_risk = sum(r.get("litros_90d", 0) for r in rows)
+
+    finally:
+        conn.close()
+
+    return {
+        "days_inactive": days_inactive,
+        "min_cargas": min_cargas,
+        "total_at_risk": total_at_risk,
+        "litros_at_risk": litros_at_risk,
         "rows": rows,
     }

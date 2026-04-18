@@ -5,6 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Central Gas — Dashboard</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⛽</text></svg>" />
+  <link rel="manifest" href="/static/manifest.json" />
+  <meta name="theme-color" content="#0D2B4E" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Central Gas" />
 
   <!-- Brand fonts (same as centralgas.com.mx landing) -->
   <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@300;400;600;700&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -397,14 +402,456 @@
     }
 
     // ====================================================
+    // Modal component
+    // ====================================================
+    function Modal({ open, onClose, title, children, wide }) {
+      if (!open) return null;
+      return (
+        <div className="fixed inset-0 z-50 flex items-start justify-center pt-12 pb-8 overflow-y-auto" onClick={onClose}>
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" />
+          <div className={`relative bg-azul-dark border border-cyan-brand/20 rounded-xl shadow-2xl p-6 mx-4 ${wide ? 'max-w-5xl w-full' : 'max-w-3xl w-full'}`}
+               onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-5">
+              <h2 className="font-display text-lg font-bold text-white uppercase tracking-wider">{title}</h2>
+              <button onClick={onClose} className="text-white/40 hover:text-white text-2xl leading-none">&times;</button>
+            </div>
+            {children}
+          </div>
+        </div>
+      );
+    }
+
+    // ====================================================
+    // Station detail modal (HU-DASH-2.1)
+    // ====================================================
+    function StationModal({ station, onClose, onPlacaClick }) {
+      const [data, setData] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [err, setErr] = useState(null);
+
+      useEffect(() => {
+        if (!station) return;
+        setLoading(true); setErr(null);
+        apiGet('/api/stations/' + encodeURIComponent(station))
+          .then(setData).catch(setErr).finally(() => setLoading(false));
+      }, [station]);
+
+      if (!station) return null;
+      const kpis = data?.kpis || {};
+      const byMonth = data?.by_month || [];
+      const topPlacas = data?.top_placas || [];
+      const heatmap = data?.heatmap || [];
+      const byMedio = data?.by_medio || [];
+
+      // Build heatmap grid 7 × 24
+      const heatGrid = Array.from({ length: 7 }, () => Array(24).fill(0));
+      let maxHeat = 1;
+      heatmap.forEach(h => { heatGrid[h.dow][h.hora] = h.n; if (h.n > maxHeat) maxHeat = h.n; });
+      const dayNames = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
+
+      return (
+        <Modal open={!!station} onClose={onClose} title={station} wide>
+          {loading && <LoadingBlock />}
+          {err && <ErrorBlock error={err} />}
+          {!loading && !err && data && (
+            <div className="space-y-5">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <Kpi label="Transacciones" value={num(kpis.total_txn)} variant="cyan" />
+                <Kpi label="Litros totales" value={num(kpis.total_litros)} variant="verde" />
+                <Kpi label="Revenue" value={mxn(kpis.total_mxn)} variant="purple" />
+                <Kpi label="Placas únicas" value={num(kpis.placas_unicas)} variant="amber" />
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                {/* Monthly volume chart */}
+                <Card title="Volumen mensual" subtitle={`${byMonth.length} meses`}>
+                  {byMonth.length > 0 ? (
+                    <ResponsiveContainer width="100%" height={200}>
+                      <BarChart data={byMonth} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,174,239,0.08)" />
+                        <XAxis dataKey="mes" {...axisStyle} tick={{ ...axisStyle.tick, fontSize: 9 }} angle={-45} textAnchor="end" height={50} />
+                        <YAxis {...axisStyle} />
+                        <Tooltip {...tooltipStyle} />
+                        <Bar dataKey="litros" name="LEQ" fill={BRAND.cyan} radius={[3, 3, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  ) : <div className="text-white/40 text-sm text-center py-8">Sin datos</div>}
+                </Card>
+
+                {/* Hourly heatmap */}
+                <Card title="Heatmap por hora" subtitle="Intensidad de cargas">
+                  <div className="overflow-x-auto">
+                    <div className="grid gap-[2px]" style={{ gridTemplateColumns: 'auto ' + 'repeat(24, 1fr)' }}>
+                      <div></div>
+                      {Array.from({ length: 24 }, (_, h) => (
+                        <div key={h} className="text-[8px] text-white/40 text-center">{h}</div>
+                      ))}
+                      {dayNames.map((day, di) => (
+                        <React.Fragment key={di}>
+                          <div className="text-[9px] text-white/50 pr-1 flex items-center">{day}</div>
+                          {Array.from({ length: 24 }, (_, hi) => {
+                            const val = heatGrid[di][hi];
+                            const intensity = val / maxHeat;
+                            const bg = val === 0 ? 'rgba(255,255,255,0.03)'
+                              : `rgba(0,174,239,${0.15 + intensity * 0.7})`;
+                            return <div key={hi} className="w-full aspect-square rounded-sm" title={`${day} ${hi}:00 — ${val} cargas`} style={{ background: bg, minWidth: 12 }} />;
+                          })}
+                        </React.Fragment>
+                      ))}
+                    </div>
+                  </div>
+                </Card>
+              </div>
+
+              {/* Top placas table */}
+              <Card title="Top 20 placas" subtitle="por volumen">
+                <div className="overflow-x-auto -mx-5">
+                  <table className="min-w-full text-sm">
+                    <thead>
+                      <tr>
+                        <th className="px-3 py-2 text-left font-semibold text-white/70 text-[11px] uppercase">Placa</th>
+                        <th className="px-3 py-2 text-left font-semibold text-white/70 text-[11px] uppercase">Conductor</th>
+                        <th className="px-3 py-2 text-right font-semibold text-white/70 text-[11px] uppercase">Cargas</th>
+                        <th className="px-3 py-2 text-right font-semibold text-white/70 text-[11px] uppercase">Litros</th>
+                        <th className="px-3 py-2 text-right font-semibold text-white/70 text-[11px] uppercase">MXN</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/5">
+                      {topPlacas.map((p, i) => (
+                        <tr key={i} className="hover:bg-white/5 cursor-pointer" onClick={() => { onClose(); onPlacaClick(p.placa); }}>
+                          <td className="px-3 py-2 font-mono text-cyan-300 font-semibold">{p.placa}</td>
+                          <td className="px-3 py-2 text-white/80 text-xs truncate max-w-[160px]">{p.nombre || '—'}</td>
+                          <td className="px-3 py-2 text-right font-tabular text-white/90">{num(p.cargas)}</td>
+                          <td className="px-3 py-2 text-right font-tabular text-white/90">{num(p.litros)}</td>
+                          <td className="px-3 py-2 text-right font-tabular text-emerald-300">{mxn(p.mxn)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+            </div>
+          )}
+        </Modal>
+      );
+    }
+
+    // ====================================================
+    // Placa detail modal (HU-DASH-2.2)
+    // ====================================================
+    function PlacaModal({ placa, onClose, onStationClick }) {
+      const [data, setData] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [err, setErr] = useState(null);
+
+      useEffect(() => {
+        if (!placa) return;
+        setLoading(true); setErr(null);
+        apiGet('/api/placas/' + encodeURIComponent(placa))
+          .then(setData).catch(setErr).finally(() => setLoading(false));
+      }, [placa]);
+
+      if (!placa) return null;
+      const kpis = data?.kpis || {};
+      const client = data?.client;
+      const byMonth = data?.by_month || [];
+      const stations = data?.stations || [];
+      const recent = data?.recent || [];
+
+      const diasColor = (d) => {
+        if (d == null) return 'text-white/50';
+        if (d > 14) return 'text-red-400';
+        if (d > 7) return 'text-amber-400';
+        return 'text-emerald-400';
+      };
+
+      return (
+        <Modal open={!!placa} onClose={onClose} title={`Placa: ${placa}`} wide>
+          {loading && <LoadingBlock />}
+          {err && <ErrorBlock error={err} />}
+          {!loading && !err && data && (
+            <div className="space-y-5">
+              {/* Client info banner */}
+              {client && (
+                <div className="bg-white/5 rounded-lg p-4 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                  <div><span className="text-white/50 text-xs block">Conductor</span><span className="text-white font-semibold">{client.nombre || '—'}</span></div>
+                  <div><span className="text-white/50 text-xs block">Segmento</span><span className="text-white">{client.segmento || '—'}</span></div>
+                  <div><span className="text-white/50 text-xs block">Modelo</span><span className="text-white">{client.modelo || '—'}</span></div>
+                  <div><span className="text-white/50 text-xs block">Teléfono</span><span className="text-white">{client.telefono || '—'}</span></div>
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                <Kpi label="Total cargas" value={num(kpis.total_cargas)} variant="cyan" />
+                <Kpi label="Total litros" value={num(kpis.total_litros)} variant="verde" />
+                <Kpi label="Total MXN" value={mxn(kpis.total_mxn)} variant="purple" />
+                <Kpi label="Prom/carga" value={num(kpis.prom_litros, 1) + ' LEQ'} variant="amber" />
+                <Kpi label="Días sin cargar" value={kpis.dias_sin_cargar != null ? kpis.dias_sin_cargar : '—'} variant={kpis.dias_sin_cargar > 7 ? 'amber' : 'cyan'} />
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                {/* Monthly trend */}
+                <Card title="Litros por mes" subtitle={`${byMonth.length} meses`}>
+                  {byMonth.length > 0 ? (
+                    <ResponsiveContainer width="100%" height={200}>
+                      <BarChart data={byMonth} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,174,239,0.08)" />
+                        <XAxis dataKey="mes" {...axisStyle} tick={{ ...axisStyle.tick, fontSize: 9 }} angle={-45} textAnchor="end" height={50} />
+                        <YAxis {...axisStyle} />
+                        <Tooltip {...tooltipStyle} />
+                        <Bar dataKey="litros" name="LEQ" fill={BRAND.verde} radius={[3, 3, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  ) : <div className="text-white/40 text-sm text-center py-8">Sin datos</div>}
+                </Card>
+
+                {/* Stations visited */}
+                <Card title="Estaciones visitadas" subtitle={`${stations.length} estaciones`}>
+                  <div className="space-y-2">
+                    {stations.map((s, i) => {
+                      const pct = stations[0]?.litros > 0 ? (s.litros / stations[0].litros * 100) : 0;
+                      return (
+                        <div key={i} className="group cursor-pointer" onClick={() => { onClose(); onStationClick(s.station); }}>
+                          <div className="flex justify-between text-sm mb-1">
+                            <span className="text-cyan-300 group-hover:text-white transition truncate max-w-[200px]">{s.station}</span>
+                            <span className="text-white/70 font-tabular">{num(s.cargas)} cargas · {num(s.litros)} LEQ</span>
+                          </div>
+                          <div className="h-1.5 bg-white/5 rounded-full overflow-hidden">
+                            <div className="h-full bg-gradient-to-r from-cyan-brand to-verde-brand rounded-full" style={{ width: `${pct}%` }} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </Card>
+              </div>
+
+              {/* Recent transactions */}
+              <Card title="Últimas 50 transacciones">
+                <div className="overflow-x-auto -mx-5">
+                  <table className="min-w-full text-sm">
+                    <thead>
+                      <tr>
+                        <th className="px-3 py-2 text-left text-white/70 text-[11px] uppercase">Fecha</th>
+                        <th className="px-3 py-2 text-left text-white/70 text-[11px] uppercase">Estación</th>
+                        <th className="px-3 py-2 text-right text-white/70 text-[11px] uppercase">Litros</th>
+                        <th className="px-3 py-2 text-right text-white/70 text-[11px] uppercase">Total</th>
+                        <th className="px-3 py-2 text-right text-white/70 text-[11px] uppercase">Recaudo</th>
+                        <th className="px-3 py-2 text-left text-white/70 text-[11px] uppercase">Pago</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/5">
+                      {recent.map((r, i) => (
+                        <tr key={i} className="hover:bg-white/5">
+                          <td className="px-3 py-1.5 text-white/70 text-xs whitespace-nowrap">{dtfmt(r.fecha)}</td>
+                          <td className="px-3 py-1.5 text-white/80 text-xs truncate max-w-[140px]">{r.estacion || '—'}</td>
+                          <td className="px-3 py-1.5 text-right font-tabular text-white/90">{num(r.litros || 0)}</td>
+                          <td className="px-3 py-1.5 text-right font-tabular text-white/90">{mxn(r.total_mxn || 0)}</td>
+                          <td className="px-3 py-1.5 text-right font-tabular text-emerald-300">{mxn(r.recaudo_total || 0)}</td>
+                          <td className="px-3 py-1.5 text-white/60 text-xs">{prettifyMedio(r.medio_pago)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+            </div>
+          )}
+        </Modal>
+      );
+    }
+
+    // ====================================================
+    // Search overlay (HU-DASH-2.5)
+    // ====================================================
+    function SearchOverlay({ open, onClose, onPlacaClick, onStationClick }) {
+      const [q, setQ] = useState('');
+      const [results, setResults] = useState([]);
+      const [loading, setLoading] = useState(false);
+      const inputRef = useRef(null);
+
+      useEffect(() => {
+        if (open && inputRef.current) inputRef.current.focus();
+        if (!open) { setQ(''); setResults([]); }
+      }, [open]);
+
+      useEffect(() => {
+        if (q.length < 2) { setResults([]); return; }
+        const timer = setTimeout(() => {
+          setLoading(true);
+          apiGet('/api/search?q=' + encodeURIComponent(q))
+            .then(d => setResults(d.results || []))
+            .catch(() => setResults([]))
+            .finally(() => setLoading(false));
+        }, 300);
+        return () => clearTimeout(timer);
+      }, [q]);
+
+      const handleSelect = (r) => {
+        onClose();
+        if (r.type === 'placa') onPlacaClick(r.id);
+        else if (r.type === 'estacion') onStationClick(r.id);
+      };
+
+      const handleKeyDown = (e) => {
+        if (e.key === 'Escape') onClose();
+        if (e.key === 'Enter' && results.length > 0) handleSelect(results[0]);
+      };
+
+      if (!open) return null;
+      return (
+        <div className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh]" onClick={onClose}>
+          <div className="fixed inset-0 bg-black/50 backdrop-blur-sm" />
+          <div className="relative w-full max-w-xl mx-4" onClick={e => e.stopPropagation()}>
+            <div className="bg-azul-dark border border-cyan-brand/30 rounded-xl shadow-2xl overflow-hidden">
+              <div className="flex items-center px-4 border-b border-white/10">
+                <span className="text-white/40 mr-3 text-lg">&#x1F50D;</span>
+                <input ref={inputRef} type="text" value={q} onChange={e => setQ(e.target.value)} onKeyDown={handleKeyDown}
+                  placeholder="Buscar placa, conductor o estación…"
+                  className="w-full bg-transparent text-white py-4 text-sm focus:outline-none placeholder-white/30" />
+                <kbd className="text-[10px] text-white/30 border border-white/15 rounded px-1.5 py-0.5 ml-2">ESC</kbd>
+              </div>
+              {loading && <div className="text-white/40 text-sm text-center py-4 loading-pulse">Buscando…</div>}
+              {!loading && q.length >= 2 && results.length === 0 && (
+                <div className="text-white/40 text-sm text-center py-4">Sin resultados para "{q}"</div>
+              )}
+              {results.length > 0 && (
+                <div className="max-h-[300px] overflow-y-auto">
+                  {results.map((r, i) => (
+                    <button key={i} onClick={() => handleSelect(r)}
+                      className="w-full text-left px-4 py-3 hover:bg-white/5 transition flex items-center gap-3 border-b border-white/5 last:border-0">
+                      <span className={`text-[10px] uppercase font-semibold tracking-wider px-1.5 py-0.5 rounded ${r.type === 'placa' ? 'bg-cyan-brand/20 text-cyan-300' : 'bg-verde-brand/20 text-emerald-300'}`}>
+                        {r.type === 'placa' ? 'Placa' : 'Estación'}
+                      </span>
+                      <span className="text-white font-mono font-semibold">{r.label}</span>
+                      <span className="text-white/50 text-xs truncate">{r.detail}</span>
+                      <span className="text-white/30 text-xs ml-auto">{r.meta}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ====================================================
+    // Retention alerts tab (HU-DASH-3.3)
+    // ====================================================
+    function RetentionTab({ onPlacaClick }) {
+      const [data, setData] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [err, setErr] = useState(null);
+      const [days, setDays] = useState(7);
+
+      const fetchData = useCallback(async () => {
+        setLoading(true); setErr(null);
+        try { setData(await apiGet('/api/retention?days=' + days)); }
+        catch (e) { setErr(e); }
+        finally { setLoading(false); }
+      }, [days]);
+
+      useEffect(() => { fetchData(); }, [fetchData]);
+
+      const exportCsv = () => {
+        if (!data?.rows?.length) return;
+        const cols = ['placa', 'nombre', 'telefono', 'segmento', 'dias_sin_cargar', 'cargas_90d', 'litros_90d', 'prom_litros', 'estacion_frecuente'];
+        const header = cols.join(',');
+        const lines = data.rows.map(r => cols.map(c => '"' + String(r[c] || '').replace(/"/g, '""') + '"').join(','));
+        const csv = '\uFEFF' + header + '\n' + lines.join('\n');
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a'); a.href = url; a.download = 'retention_alerts.csv'; a.click();
+        URL.revokeObjectURL(url);
+      };
+
+      return (
+        <div className="space-y-4">
+          <Card title="Configurar alertas">
+            <div className="flex items-center gap-4">
+              <label className="text-sm text-white/70">Días sin cargar:</label>
+              {[7, 10, 14, 30].map(d => (
+                <button key={d} onClick={() => setDays(d)}
+                  className={`px-3 py-1.5 rounded text-sm font-semibold transition ${days === d ? 'bg-gradient-to-br from-cyan-brand to-verde-brand text-azul-dark' : 'bg-white/5 text-white/60 hover:bg-white/10'}`}>
+                  {d} días
+                </button>
+              ))}
+            </div>
+          </Card>
+
+          {loading && <LoadingBlock />}
+          {err && <ErrorBlock error={err} />}
+          {!loading && !err && data && (
+            <>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                <Kpi label="Placas en riesgo" value={num(data.total_at_risk)} sub={`>= ${days} días sin cargar`} variant={data.total_at_risk > 20 ? 'amber' : 'cyan'} />
+                <Kpi label="Litros en riesgo (90d)" value={num(data.litros_at_risk)} sub="volumen histórico" variant="verde" />
+                <Kpi label="Revenue en riesgo" value={mxn(data.litros_at_risk * 15)} sub="estimado $15/LEQ prom" variant="purple" />
+              </div>
+
+              <Card
+                title="Placas inactivas"
+                subtitle={`${data.rows.length} placas con >= ${days} días sin cargar`}
+                titleAction={
+                  <button onClick={exportCsv} disabled={!data.rows.length}
+                    className="text-[11px] font-semibold uppercase tracking-wider bg-cyan-brand/10 hover:bg-cyan-brand/20 border border-cyan-brand/40 text-cyan-300 px-3 py-1.5 rounded transition disabled:opacity-40">
+                    ↓ Export CSV
+                  </button>
+                }
+              >
+                <div className="overflow-x-auto -mx-5">
+                  <table className="min-w-full text-sm">
+                    <thead>
+                      <tr>
+                        <th className="px-3 py-2 text-left text-white/70 text-[11px] uppercase">Placa</th>
+                        <th className="px-3 py-2 text-left text-white/70 text-[11px] uppercase">Conductor</th>
+                        <th className="px-3 py-2 text-left text-white/70 text-[11px] uppercase">Segmento</th>
+                        <th className="px-3 py-2 text-right text-white/70 text-[11px] uppercase">Días sin cargar</th>
+                        <th className="px-3 py-2 text-right text-white/70 text-[11px] uppercase">Cargas (90d)</th>
+                        <th className="px-3 py-2 text-right text-white/70 text-[11px] uppercase">Litros (90d)</th>
+                        <th className="px-3 py-2 text-left text-white/70 text-[11px] uppercase">Estación freq.</th>
+                        <th className="px-3 py-2 text-left text-white/70 text-[11px] uppercase">Teléfono</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/5">
+                      {data.rows.map((r, i) => (
+                        <tr key={i} className="hover:bg-white/5 cursor-pointer" onClick={() => onPlacaClick(r.placa)}>
+                          <td className="px-3 py-2 font-mono text-cyan-300 font-semibold">{r.placa}</td>
+                          <td className="px-3 py-2 text-white/80 text-xs truncate max-w-[160px]">{r.nombre || '—'}</td>
+                          <td className="px-3 py-2 text-white/60 text-xs">{r.segmento || '—'}</td>
+                          <td className={`px-3 py-2 text-right font-tabular font-semibold ${r.dias_sin_cargar > 14 ? 'text-red-400' : r.dias_sin_cargar > 7 ? 'text-amber-400' : 'text-white/90'}`}>
+                            {r.dias_sin_cargar}
+                          </td>
+                          <td className="px-3 py-2 text-right font-tabular text-white/90">{r.cargas_90d}</td>
+                          <td className="px-3 py-2 text-right font-tabular text-white/90">{num(r.litros_90d)}</td>
+                          <td className="px-3 py-2 text-white/70 text-xs truncate max-w-[140px]">{r.estacion_frecuente || '—'}</td>
+                          <td className="px-3 py-2 text-white/60 text-xs">{r.telefono || '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {data.rows.length === 0 && (
+                  <div className="text-white/40 text-sm text-center py-6">Todas las placas activas han cargado en los últimos {days} días</div>
+                )}
+              </Card>
+            </>
+          )}
+        </div>
+      );
+    }
+
+    // ====================================================
     // Header + tabs
     // ====================================================
-    function Header({ tab, onTab }) {
+    function Header({ tab, onTab, onSearch }) {
       const tabs = [
         { id: 'resumen', label: 'Resumen' },
         { id: 'txn', label: 'Transacciones' },
         { id: 'sp', label: 'Sobreprecio' },
         { id: 'cmu', label: 'Cartera CMU' },
+        { id: 'retention', label: 'Retención' },
         { id: 'upload', label: 'Upload' },
       ];
       return (
@@ -418,17 +865,25 @@
                   <p className="text-[10px] text-white/40 uppercase tracking-[0.25em] mt-1">Agente IA · Fase 1 · Validación</p>
                 </div>
               </div>
-              <nav className="flex items-center gap-1">
-                {tabs.map(t => (
-                  <button
-                    key={t.id}
-                    onClick={() => onTab(t.id)}
-                    className={`tab-btn px-4 py-2 rounded-md text-sm text-white/60 ${tab === t.id ? 'active' : ''}`}
-                  >
-                    {t.label}
-                  </button>
-                ))}
-              </nav>
+              <div className="flex items-center gap-2">
+                <button onClick={onSearch}
+                  className="flex items-center gap-2 bg-white/5 hover:bg-white/10 border border-white/10 text-white/50 hover:text-white/80 px-3 py-1.5 rounded-md text-sm transition mr-2">
+                  <span>&#x1F50D;</span>
+                  <span className="hidden sm:inline">Buscar…</span>
+                  <kbd className="text-[10px] border border-white/15 rounded px-1 py-0.5">⌘K</kbd>
+                </button>
+                <nav className="flex items-center gap-1">
+                  {tabs.map(t => (
+                    <button
+                      key={t.id}
+                      onClick={() => onTab(t.id)}
+                      className={`tab-btn px-3 py-2 rounded-md text-sm text-white/60 ${tab === t.id ? 'active' : ''}`}
+                    >
+                      {t.label}
+                    </button>
+                  ))}
+                </nav>
+              </div>
             </div>
           </div>
         </header>
@@ -438,7 +893,7 @@
     // ====================================================
     // Resumen tab
     // ====================================================
-    function ResumenTab() {
+    function ResumenTab({ onStationClick, onPlacaClick }) {
       const [stats, setStats] = useState(null);
       const [err, setErr] = useState(null);
       const [loading, setLoading] = useState(true);
@@ -492,10 +947,14 @@
                 ))}
               </div>
             </Card>
-            <Card title="Estaciones activas">
-              <div className="font-display text-3xl font-bold text-white font-tabular">{byEstacion.length}</div>
-              <div className="text-[11px] text-white/50 mt-1 truncate" title={byEstacion[0]?.station_natgas}>
-                {truncate(byEstacion[0]?.station_natgas, 28)} lidera
+            <Card title="Segmento vehículo">
+              <div className="text-sm text-white/80 space-y-1">
+                {(stats.by_segmento || []).slice(0, 4).map((s, i) => (
+                  <div key={i} className="flex justify-between">
+                    <span className="truncate max-w-[120px]">{s.segmento === 'SIN_DATOS' ? 'Sin datos' : s.segmento}</span>
+                    <strong className="text-cyan-300 font-tabular">{s.pct}%</strong>
+                  </div>
+                ))}
               </div>
             </Card>
           </div>
@@ -531,12 +990,13 @@
               )}
             </Card>
 
-            <Card title="Top 10 estaciones" subtitle="por volumen">
+            <Card title="Top 10 estaciones" subtitle="click para detalle">
               {byEstacion.length === 0 ? (
                 <div className="text-white/40 text-sm py-8 text-center">Sin datos</div>
               ) : (
                 <ResponsiveContainer width="100%" height={320}>
-                  <BarChart data={byEstacion} layout="vertical" margin={{ top: 5, right: 20, bottom: 5, left: 150 }}>
+                  <BarChart data={byEstacion} layout="vertical" margin={{ top: 5, right: 20, bottom: 5, left: 150 }}
+                    onClick={(e) => { if (e?.activePayload?.[0]?.payload?.station_natgas) onStationClick(e.activePayload[0].payload.station_natgas); }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,174,239,0.1)" />
                     <XAxis type="number" {...axisStyle} tickFormatter={(n) => num(n, 0)} />
                     <YAxis
@@ -547,7 +1007,7 @@
                       tickFormatter={(name) => truncate(name, 20)}
                     />
                     <Tooltip {...tooltipStyle} formatter={(v) => [num(v, 0) + ' LEQ', 'Litros']} labelFormatter={(l) => l} />
-                    <Bar dataKey="litros" radius={[0, 4, 4, 0]}>
+                    <Bar dataKey="litros" radius={[0, 4, 4, 0]} style={{ cursor: 'pointer' }}>
                       {byEstacion.map((e, i) => <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />)}
                     </Bar>
                   </BarChart>
@@ -942,7 +1402,7 @@
                           <td className="px-3 py-2 text-white/70 text-xs whitespace-nowrap">{r.fecha_venta || '—'}</td>
                           <td className="px-3 py-2 font-mono text-cyan-300">{r.placa || '—'}</td>
                           <td className="px-3 py-2 text-white/80 truncate max-w-[180px] text-xs">{r.conductor || '—'}</td>
-                          <td className="px-3 py-2 text-white/70 text-xs">{trunc(r.estacion || '', 20)}</td>
+                          <td className="px-3 py-2 text-white/70 text-xs">{truncate(r.estacion || '', 20)}</td>
                           <td className="px-3 py-2 text-right font-tabular text-white/90">{num(r.litros || 0)}</td>
                           <td className="px-3 py-2 text-right font-tabular text-amber-300">${num(r.tarifa_leq || 0, 2)}</td>
                           <td className="px-3 py-2 text-right font-tabular font-semibold text-emerald-300">${num(r.cantidad_recaudo || 0)}</td>
@@ -1149,19 +1609,41 @@
     function App() {
       const [tab, setTab] = useState('resumen');
       const [version, setVersion] = useState(null);
+      const [searchOpen, setSearchOpen] = useState(false);
+      const [stationModal, setStationModal] = useState(null);
+      const [placaModal, setPlacaModal] = useState(null);
 
       useEffect(() => { apiGet('/health').then(d => setVersion(d.version)).catch(() => {}); }, []);
 
+      // Cmd/Ctrl+K shortcut for search
+      useEffect(() => {
+        const handler = (e) => {
+          if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+            e.preventDefault();
+            setSearchOpen(v => !v);
+          }
+        };
+        window.addEventListener('keydown', handler);
+        return () => window.removeEventListener('keydown', handler);
+      }, []);
+
       return (
         <div className="min-h-screen">
-          <Header tab={tab} onTab={setTab} />
+          <Header tab={tab} onTab={setTab} onSearch={() => setSearchOpen(true)} />
           <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-            {tab === 'resumen' && <ResumenTab />}
+            {tab === 'resumen' && <ResumenTab onStationClick={setStationModal} onPlacaClick={setPlacaModal} />}
             {tab === 'txn' && <TxnTab />}
             {tab === 'sp' && <SobreprecioTab />}
             {tab === 'cmu' && <CmuTab />}
+            {tab === 'retention' && <RetentionTab onPlacaClick={setPlacaModal} />}
             {tab === 'upload' && <UploadTab />}
           </main>
+
+          {/* Modals */}
+          <StationModal station={stationModal} onClose={() => setStationModal(null)} onPlacaClick={setPlacaModal} />
+          <PlacaModal placa={placaModal} onClose={() => setPlacaModal(null)} onStationClick={setStationModal} />
+          <SearchOverlay open={searchOpen} onClose={() => setSearchOpen(false)} onPlacaClick={setPlacaModal} onStationClick={setStationModal} />
+
           <footer className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 text-[11px] text-white/30 text-center tracking-wider uppercase font-display">
             {version && <span>Central Gas Agent {version} · </span>}
             <a href="/docs" className="hover:text-cyan-300 transition">API Docs</a>
@@ -1175,6 +1657,12 @@
     }
 
     ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+  <script>
+    // PWA Service Worker registration (HU-DASH-X.4)
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/static/sw.js').catch(() => {});
+    }
   </script>
 </body>
 </html>
