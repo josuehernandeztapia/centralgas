@@ -25,8 +25,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -609,6 +609,67 @@ async def api_health_scores(
     except Exception as e:
         logger.exception("get_health_scores failed")
         raise HTTPException(status_code=500, detail=f"query failed: {e}")
+
+
+# ============================================================
+# /webhook/whatsapp — Twilio incoming message webhook
+# ============================================================
+
+@app.post("/webhook/whatsapp")
+async def whatsapp_webhook(request: Request):
+    """
+    Receive incoming WhatsApp messages from Twilio.
+    Twilio sends form-encoded POST with: From, To, Body, MessageSid, etc.
+    Must return TwiML XML response.
+    """
+    from app.services.whatsapp_bot import route_message
+
+    try:
+        form = await request.form()
+        phone_from = form.get("From", "")       # e.g. whatsapp:+521234567890
+        phone_to = form.get("To", "")           # our Twilio number
+        body = form.get("Body", "")
+        twilio_sid = form.get("MessageSid", "")
+
+        logger.info(f"WhatsApp incoming: from={phone_from} body={body[:50]}")
+
+        # Route message and get response
+        response_text = route_message(
+            phone_from=phone_from,
+            phone_to=phone_to,
+            body=body,
+            twilio_sid=twilio_sid,
+        )
+
+        # Return TwiML response
+        twiml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            "<Response>"
+            f"<Message>{_escape_xml(response_text)}</Message>"
+            "</Response>"
+        )
+        return Response(content=twiml, media_type="application/xml")
+
+    except Exception as e:
+        logger.exception("whatsapp_webhook failed")
+        # Still return valid TwiML so Twilio doesn't retry
+        twiml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            "<Response>"
+            "<Message>Lo sentimos, ocurrió un error. Intenta de nuevo en unos minutos.</Message>"
+            "</Response>"
+        )
+        return Response(content=twiml, media_type="application/xml")
+
+
+def _escape_xml(text: str) -> str:
+    """Escape XML special characters for TwiML."""
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
 
 
 # ============================================================
