@@ -371,3 +371,147 @@ def sobreprecio_distribution(buckets: int = 12) -> dict:
         conn.close()
 
     return {"stats": stats, "buckets": bucket_list}
+
+
+# ============================================================
+# /api/recaudos — CMU collections derived from transactions
+# ============================================================
+
+def list_recaudos(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    placa: Optional[str] = None,
+    limit: int = 5000,
+    offset: int = 0,
+) -> dict:
+    """
+    Return transactions with recaudo > 0, enriched with client name.
+
+    The recaudo fields in GasUp are:
+      - recaudo_pagado = tarifa per LEQ (sobreprecio)
+      - recaudo_valor  = litros × tarifa (total surcharge)
+
+    This query is the functional equivalent of the weekly
+    NatGas→CMU recaudos Excel, but available daily via API.
+    """
+    conn = _get_conn()
+    try:
+        with conn.cursor() as cur:
+            where = ["t.recaudo_pagado > 0", "t.recaudo_pagado IS NOT NULL"]
+            params: list[Any] = []
+
+            if placa:
+                where.append("t.placa = %s")
+                params.append(placa.upper().strip())
+            if date_from:
+                where.append("DATE(t.timestamp_local) >= %s")
+                params.append(date_from)
+            if date_to:
+                where.append("DATE(t.timestamp_local) <= %s")
+                params.append(date_to)
+
+            where_sql = " AND ".join(where)
+
+            # Total count
+            cur.execute(f"SELECT COUNT(*) FROM transactions t WHERE {where_sql}", params)
+            total = cur.fetchone()[0]
+
+            # KPIs
+            cur.execute(f"""
+                SELECT
+                    COUNT(DISTINCT t.placa) AS placas_activas,
+                    SUM(t.litros) AS total_litros,
+                    SUM(t.recaudo_valor) AS total_recaudado,
+                    AVG(t.recaudo_pagado) AS tarifa_promedio,
+                    MIN(DATE(t.timestamp_local)) AS fecha_min,
+                    MAX(DATE(t.timestamp_local)) AS fecha_max
+                FROM transactions t
+                WHERE {where_sql}
+            """, params)
+            kpi_row = cur.fetchone()
+            kpis = {
+                "placas_activas": kpi_row[0] or 0,
+                "total_litros": float(kpi_row[1] or 0),
+                "total_recaudado": float(kpi_row[2] or 0),
+                "tarifa_promedio": float(kpi_row[3] or 0),
+                "fecha_min": str(kpi_row[4]) if kpi_row[4] else None,
+                "fecha_max": str(kpi_row[5]) if kpi_row[5] else None,
+            }
+
+            # By placa summary
+            cur.execute(f"""
+                SELECT
+                    t.placa,
+                    c.nombre,
+                    COUNT(*) AS cargas,
+                    SUM(t.litros) AS litros,
+                    AVG(t.recaudo_pagado) AS tarifa_leq,
+                    SUM(t.recaudo_valor) AS total_recaudado
+                FROM transactions t
+                LEFT JOIN clients c ON c.placa = t.placa
+                WHERE {where_sql}
+                GROUP BY t.placa, c.nombre
+                ORDER BY total_recaudado DESC
+            """, params)
+            cols_placa = [d[0] for d in cur.description]
+            by_placa = [
+                {c: _serialize(v) for c, v in zip(cols_placa, row)}
+                for row in cur.fetchall()
+            ]
+
+            # By day summary
+            cur.execute(f"""
+                SELECT
+                    DATE(t.timestamp_local) AS dia,
+                    COUNT(*) AS cargas,
+                    COUNT(DISTINCT t.placa) AS placas,
+                    SUM(t.litros) AS litros,
+                    SUM(t.recaudo_valor) AS recaudado
+                FROM transactions t
+                WHERE {where_sql}
+                GROUP BY DATE(t.timestamp_local)
+                ORDER BY dia DESC
+                LIMIT 60
+            """, params)
+            cols_day = [d[0] for d in cur.description]
+            by_day = [
+                {c: _serialize(v) for c, v in zip(cols_day, row)}
+                for row in cur.fetchall()
+            ]
+
+            # Detail rows (paginated)
+            cur.execute(f"""
+                SELECT
+                    t.placa,
+                    c.nombre AS conductor,
+                    t.litros,
+                    t.recaudo_pagado AS tarifa_leq,
+                    t.recaudo_valor AS cantidad_recaudo,
+                    t.timestamp_local AS fecha_hora_venta,
+                    DATE(t.timestamp_local) AS fecha_venta,
+                    t.station_natgas AS estacion,
+                    t.pvp,
+                    t.total_mxn,
+                    t.placa || '-' || t.recaudo_pagado AS id_placa_recaudo
+                FROM transactions t
+                LEFT JOIN clients c ON c.placa = t.placa
+                WHERE {where_sql}
+                ORDER BY t.timestamp_local DESC
+                LIMIT %s OFFSET %s
+            """, params + [min(limit, 5000), offset])
+            cols = [d[0] for d in cur.description]
+            rows = [
+                {c: _serialize(v) for c, v in zip(cols, row)}
+                for row in cur.fetchall()
+            ]
+
+    finally:
+        conn.close()
+
+    return {
+        "total": total,
+        "kpis": kpis,
+        "by_placa": by_placa,
+        "by_day": by_day,
+        "rows": rows,
+    }

@@ -412,6 +412,96 @@ async def sobreprecio_distribution_endpoint(
 
 
 # ============================================================
+# /api/recaudos — CMU collections (derived from transactions)
+# ============================================================
+
+@app.get("/api/recaudos")
+async def api_recaudos(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    placa: Optional[str] = None,
+    limit: int = 5000,
+    offset: int = 0,
+    _: str = Depends(require_auth),
+):
+    """
+    CMU recaudos report — derived from transactions WHERE recaudo > 0.
+
+    Returns:
+      - kpis: placas_activas, total_litros, total_recaudado, tarifa_promedio
+      - by_placa: summary per plate (cargas, litros, tarifa, total)
+      - by_day: summary per day (cargas, placas, litros, recaudado)
+      - rows: paginated detail rows matching NatGas→CMU format
+
+    This replaces the weekly Excel that NatGas sends to CMU
+    with a daily API + dashboard.
+    """
+    from app.db.queries import list_recaudos
+    try:
+        return list_recaudos(
+            date_from=date_from, date_to=date_to,
+            placa=placa, limit=limit, offset=offset,
+        )
+    except Exception as e:
+        logger.exception("list_recaudos failed")
+        raise HTTPException(status_code=500, detail=f"query failed: {e}")
+
+
+@app.get("/api/recaudos.csv")
+async def api_recaudos_csv(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    placa: Optional[str] = None,
+    limit: int = 100000,
+    _: str = Depends(require_auth),
+):
+    """
+    Export CMU recaudos as CSV — compatible with the NatGas→CMU Excel format.
+    """
+    import csv
+    import io
+    from app.db.queries import list_recaudos
+
+    try:
+        data = list_recaudos(
+            date_from=date_from, date_to=date_to,
+            placa=placa, limit=min(limit, 100000), offset=0,
+        )
+    except Exception as e:
+        logger.exception("recaudos csv failed")
+        raise HTTPException(status_code=500, detail=f"query failed: {e}")
+
+    rows = data.get("rows", [])
+    cols = [
+        "placa", "conductor", "litros", "tarifa_leq",
+        "cantidad_recaudo", "fecha_hora_venta", "fecha_venta",
+        "estacion", "pvp", "total_mxn", "id_placa_recaudo",
+    ]
+
+    def _gen():
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
+        writer.writeheader()
+        yield buf.getvalue()
+        buf.seek(0); buf.truncate(0)
+        for r in rows:
+            writer.writerow({c: r.get(c, "") for c in cols})
+            yield buf.getvalue()
+            buf.seek(0); buf.truncate(0)
+
+    fname_parts = ["recaudos_cmu"]
+    if date_from: fname_parts.append(f"from-{date_from}")
+    if date_to:   fname_parts.append(f"to-{date_to}")
+    fname = "_".join(fname_parts) + ".csv"
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+# ============================================================
 # Phase 2 placeholder endpoints (return 501 for now)
 # ============================================================
 

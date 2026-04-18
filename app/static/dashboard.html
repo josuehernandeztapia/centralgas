@@ -404,6 +404,7 @@
         { id: 'resumen', label: 'Resumen' },
         { id: 'txn', label: 'Transacciones' },
         { id: 'sp', label: 'Sobreprecio' },
+        { id: 'cmu', label: 'Cartera CMU' },
         { id: 'upload', label: 'Upload' },
       ];
       return (
@@ -791,6 +792,175 @@
     }
 
     // ====================================================
+    // Cartera CMU tab — recaudos derived from transactions
+    // ====================================================
+    function CmuTab() {
+      const [data, setData] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [err, setErr] = useState(null);
+      const [filters, setFilters] = useState({ date_from: '', date_to: '', placa: '' });
+
+      const fetchData = useCallback(async () => {
+        setLoading(true); setErr(null);
+        try {
+          const qs = new URLSearchParams();
+          if (filters.date_from) qs.set('date_from', filters.date_from);
+          if (filters.date_to) qs.set('date_to', filters.date_to);
+          if (filters.placa) qs.set('placa', filters.placa);
+          setData(await apiGet('/api/recaudos?' + qs.toString()));
+        } catch (e) { setErr(e); }
+        finally { setLoading(false); }
+      }, [filters]);
+
+      useEffect(() => { fetchData(); }, [fetchData]);
+
+      const applyFilters = (e) => { e.preventDefault(); fetchData(); };
+      const clearFilters = () => { setFilters({ date_from: '', date_to: '', placa: '' }); };
+
+      const exportCsv = () => {
+        const qs = new URLSearchParams();
+        if (filters.date_from) qs.set('date_from', filters.date_from);
+        if (filters.date_to) qs.set('date_to', filters.date_to);
+        if (filters.placa) qs.set('placa', filters.placa);
+        window.location.href = API_BASE + '/api/recaudos.csv' + (qs.toString() ? '?' + qs.toString() : '');
+      };
+
+      const kpis = data?.kpis || {};
+      const byPlaca = data?.by_placa || [];
+      const byDay = (data?.by_day || []).slice().reverse();
+      const inputCls = 'bg-azul-dark/50 border border-cyan-brand/20 text-white placeholder-white/30 px-3 py-2 rounded text-sm focus:border-cyan-brand/60 focus:outline-none';
+
+      return (
+        <div className="space-y-4">
+          <Card title="Filtros Cartera CMU">
+            <form onSubmit={applyFilters} className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+              <input type="text" placeholder="Placa (ej: A05219A)" className={`${inputCls} uppercase`}
+                value={filters.placa}
+                onChange={e => setFilters({...filters, placa: e.target.value.toUpperCase()})} />
+              <input type="date" className={inputCls}
+                value={filters.date_from}
+                onChange={e => setFilters({...filters, date_from: e.target.value})} />
+              <input type="date" className={inputCls}
+                value={filters.date_to}
+                onChange={e => setFilters({...filters, date_to: e.target.value})} />
+              <div className="flex gap-2">
+                <button type="submit" className="flex-1 bg-gradient-to-br from-cyan-brand to-verde-brand hover:opacity-90 text-azul-dark text-sm font-semibold py-2 px-3 rounded transition">Aplicar</button>
+                <button type="button" onClick={clearFilters} className="bg-white/5 hover:bg-white/10 border border-white/10 text-white/70 text-sm font-medium py-2 px-3 rounded transition">Limpiar</button>
+              </div>
+            </form>
+          </Card>
+
+          {loading && <LoadingBlock />}
+          {err && <ErrorBlock error={err} />}
+          {!loading && !err && data && (
+            <>
+              {/* KPIs */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <Kpi label="Placas activas" value={kpis.placas_activas} variant="cyan" />
+                <Kpi label="Total litros CMU" value={num(kpis.total_litros)} sub="LEQ despachados" variant="verde" />
+                <Kpi label="Total recaudado" value={'$' + num(kpis.total_recaudado)} sub="litros × tarifa" variant="amber" />
+                <Kpi label="Tarifa promedio" value={'$' + num(kpis.tarifa_promedio, 2) + '/LEQ'} sub={kpis.fecha_min ? `${kpis.fecha_min} → ${kpis.fecha_max}` : ''} variant="purple" />
+              </div>
+
+              {/* By placa table */}
+              <Card
+                title="Desglose por placa"
+                subtitle={`${byPlaca.length} placas con recaudo`}
+                titleAction={
+                  <button type="button" onClick={exportCsv} disabled={!data?.total}
+                    className="text-[11px] font-semibold uppercase tracking-wider bg-cyan-brand/10 hover:bg-cyan-brand/20 border border-cyan-brand/40 text-cyan-300 px-3 py-1.5 rounded transition disabled:opacity-40 disabled:cursor-not-allowed">
+                    ↓ Export CSV
+                  </button>
+                }
+              >
+                <div className="overflow-x-auto -mx-5">
+                  <table className="min-w-full text-sm">
+                    <thead>
+                      <tr>
+                        <th className="px-3 py-2 text-left font-semibold text-white/70 text-[11px] uppercase tracking-wider">Placa</th>
+                        <th className="px-3 py-2 text-left font-semibold text-white/70 text-[11px] uppercase tracking-wider">Conductor</th>
+                        <th className="px-3 py-2 text-right font-semibold text-white/70 text-[11px] uppercase tracking-wider">Cargas</th>
+                        <th className="px-3 py-2 text-right font-semibold text-white/70 text-[11px] uppercase tracking-wider">Litros</th>
+                        <th className="px-3 py-2 text-right font-semibold text-white/70 text-[11px] uppercase tracking-wider">Tarifa/LEQ</th>
+                        <th className="px-3 py-2 text-right font-semibold text-white/70 text-[11px] uppercase tracking-wider">Total recaudado</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/5">
+                      {byPlaca.map((p, i) => (
+                        <tr key={i} className="hover:bg-white/5 transition">
+                          <td className="px-3 py-2 font-mono text-cyan-300 font-semibold">{p.placa}</td>
+                          <td className="px-3 py-2 text-white/80 truncate max-w-[200px]">{p.nombre || '—'}</td>
+                          <td className="px-3 py-2 text-right font-tabular text-white/90">{num(p.cargas)}</td>
+                          <td className="px-3 py-2 text-right font-tabular text-white/90">{num(p.litros)}</td>
+                          <td className="px-3 py-2 text-right font-tabular text-amber-300">${num(p.tarifa_leq, 2)}</td>
+                          <td className="px-3 py-2 text-right font-tabular font-semibold text-emerald-300">${num(p.total_recaudado)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+
+              {/* By day chart */}
+              {byDay.length > 0 && (
+                <Card title="Recaudo diario" subtitle="Últimos 60 días con data">
+                  <div style={{ width: '100%', height: 280 }}>
+                    <ResponsiveContainer>
+                      <BarChart data={byDay} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,174,239,0.08)" />
+                        <XAxis dataKey="dia" {...axisStyle} tick={{ ...axisStyle.tick, fontSize: 9 }} angle={-45} textAnchor="end" height={60} />
+                        <YAxis yAxisId="left" {...axisStyle} />
+                        <YAxis yAxisId="right" orientation="right" {...axisStyle} />
+                        <Tooltip {...tooltipStyle} />
+                        <Bar yAxisId="left" dataKey="recaudado" name="Recaudado $" fill={BRAND.verde} radius={[3, 3, 0, 0]} />
+                        <Bar yAxisId="right" dataKey="litros" name="Litros" fill={BRAND.cyan} radius={[3, 3, 0, 0]} opacity={0.5} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </Card>
+              )}
+
+              {/* Detail rows */}
+              <Card title="Detalle transacciones CMU" subtitle={`${num(data.total)} registros con recaudo`}>
+                <div className="overflow-x-auto -mx-5">
+                  <table className="min-w-full text-sm">
+                    <thead>
+                      <tr>
+                        <th className="px-3 py-2 text-left font-semibold text-white/70 text-[11px] uppercase tracking-wider">Fecha</th>
+                        <th className="px-3 py-2 text-left font-semibold text-white/70 text-[11px] uppercase tracking-wider">Placa</th>
+                        <th className="px-3 py-2 text-left font-semibold text-white/70 text-[11px] uppercase tracking-wider">Conductor</th>
+                        <th className="px-3 py-2 text-left font-semibold text-white/70 text-[11px] uppercase tracking-wider">Estación</th>
+                        <th className="px-3 py-2 text-right font-semibold text-white/70 text-[11px] uppercase tracking-wider">Litros</th>
+                        <th className="px-3 py-2 text-right font-semibold text-white/70 text-[11px] uppercase tracking-wider">Tarifa</th>
+                        <th className="px-3 py-2 text-right font-semibold text-white/70 text-[11px] uppercase tracking-wider">Recaudo</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/5">
+                      {(data.rows || []).slice(0, 100).map((r, i) => (
+                        <tr key={i} className="hover:bg-white/5 transition">
+                          <td className="px-3 py-2 text-white/70 text-xs whitespace-nowrap">{r.fecha_venta}</td>
+                          <td className="px-3 py-2 font-mono text-cyan-300">{r.placa}</td>
+                          <td className="px-3 py-2 text-white/80 truncate max-w-[180px] text-xs">{r.conductor || '—'}</td>
+                          <td className="px-3 py-2 text-white/70 text-xs">{trunc(r.estacion, 20)}</td>
+                          <td className="px-3 py-2 text-right font-tabular text-white/90">{num(r.litros)}</td>
+                          <td className="px-3 py-2 text-right font-tabular text-amber-300">${num(r.tarifa_leq, 2)}</td>
+                          <td className="px-3 py-2 text-right font-tabular font-semibold text-emerald-300">${num(r.cantidad_recaudo)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {(data.rows || []).length > 100 && (
+                  <p className="text-xs text-white/40 mt-3 text-center">Mostrando primeros 100 de {num(data.total)} — usa Export CSV para todos</p>
+                )}
+              </Card>
+            </>
+          )}
+        </div>
+      );
+    }
+
+    // ====================================================
     // Upload tab (HU-DASH-2.3)
     // Drag-drop .xls/.xlsx → POST /upload-excel
     // ====================================================
@@ -988,6 +1158,7 @@
             {tab === 'resumen' && <ResumenTab />}
             {tab === 'txn' && <TxnTab />}
             {tab === 'sp' && <SobreprecioTab />}
+            {tab === 'cmu' && <CmuTab />}
             {tab === 'upload' && <UploadTab />}
           </main>
           <footer className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 text-[11px] text-white/30 text-center tracking-wider uppercase font-display">
