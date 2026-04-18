@@ -576,6 +576,42 @@ async def api_retention(
 
 
 # ============================================================
+# /api/health-scores — Customer Health Score Engine
+# ============================================================
+
+@app.post("/api/health-scores/compute")
+async def api_compute_health_scores(
+    _: str = Depends(require_auth),
+):
+    """Compute health scores for all active placas. Run daily via cron or on-demand."""
+    from app.db.queries import compute_health_scores
+    try:
+        result = compute_health_scores()
+        return result
+    except Exception as e:
+        logger.exception("compute_health_scores failed")
+        raise HTTPException(status_code=500, detail=f"compute failed: {e}")
+
+
+@app.get("/api/health-scores")
+async def api_health_scores(
+    classification: str = "",
+    limit: int = 200,
+    _: str = Depends(require_auth),
+):
+    """Get latest health scores, optionally filtered by classification."""
+    from app.db.queries import get_health_scores
+    try:
+        return get_health_scores(
+            classification=classification or None,
+            limit=min(limit, 500),
+        )
+    except Exception as e:
+        logger.exception("get_health_scores failed")
+        raise HTTPException(status_code=500, detail=f"query failed: {e}")
+
+
+# ============================================================
 # Phase 2 placeholder endpoints (return 501 for now)
 # ============================================================
 

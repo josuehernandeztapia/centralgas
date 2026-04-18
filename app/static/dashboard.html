@@ -843,6 +843,204 @@
     }
 
     // ====================================================
+    // Health Score Tab
+    // ====================================================
+    function HealthTab({ onPlacaClick }) {
+      const [data, setData] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [err, setErr] = useState(null);
+      const [filter, setFilter] = useState('');
+      const [computing, setComputing] = useState(false);
+
+      const fetchData = useCallback(async () => {
+        setLoading(true); setErr(null);
+        try {
+          const url = '/api/health-scores' + (filter ? '?classification=' + filter : '');
+          setData(await apiGet(url));
+        } catch (e) { setErr(e); }
+        finally { setLoading(false); }
+      }, [filter]);
+
+      useEffect(() => { fetchData(); }, [fetchData]);
+
+      const computeScores = async () => {
+        setComputing(true);
+        try {
+          await apiGet('/api/health-scores/compute', { method: 'POST' });
+          await fetchData();
+        } catch (e) { alert('Error computing: ' + e.message); }
+        finally { setComputing(false); }
+      };
+
+      // We need POST support — small helper
+      const apiPost = async (url) => {
+        const token = sessionStorage.getItem('cg_token');
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + token },
+        });
+        if (!res.ok) throw new Error(res.statusText);
+        return res.json();
+      };
+
+      const doCompute = async () => {
+        setComputing(true);
+        try {
+          await apiPost('/api/health-scores/compute');
+          await fetchData();
+        } catch (e) { alert('Error: ' + e.message); }
+        finally { setComputing(false); }
+      };
+
+      const classColors = {
+        saludable: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40',
+        atencion: 'bg-amber-500/20 text-amber-400 border-amber-500/40',
+        en_riesgo: 'bg-orange-500/20 text-orange-400 border-orange-500/40',
+        critico: 'bg-red-500/20 text-red-400 border-red-500/40',
+      };
+      const classLabels = { saludable: 'Saludable', atencion: 'Atención', en_riesgo: 'En riesgo', critico: 'Crítico' };
+
+      const scoreBar = (score) => {
+        const color = score >= 80 ? '#10b981' : score >= 60 ? '#f59e0b' : score >= 40 ? '#f97316' : '#ef4444';
+        return (
+          <div className="flex items-center gap-2 min-w-[120px]">
+            <div className="flex-1 h-2 bg-white/10 rounded-full overflow-hidden">
+              <div className="h-full rounded-full transition-all" style={{ width: score + '%', background: color }} />
+            </div>
+            <span className="text-xs font-mono font-bold" style={{ color }}>{score}</span>
+          </div>
+        );
+      };
+
+      const exportCsv = () => {
+        if (!data?.rows?.length) return;
+        const cols = ['placa', 'nombre', 'score_total', 'classification', 'dias_sin_cargar', 'cargas_90d', 'litros_90d', 'freq_score', 'volume_score', 'days_inactive_score', 'financial_score', 'loyalty_score', 'telefono'];
+        const header = cols.join(',');
+        const lines = data.rows.map(r => cols.map(c => '"' + String(r[c] || '').replace(/"/g, '""') + '"').join(','));
+        const csv = '\uFEFF' + header + '\n' + lines.join('\n');
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a'); a.href = url; a.download = 'health_scores.csv'; a.click();
+        URL.revokeObjectURL(url);
+      };
+
+      return (
+        <div className="space-y-4">
+          {/* Controls */}
+          <Card title="Health Score Engine">
+            <div className="flex flex-wrap items-center gap-3">
+              <button onClick={doCompute} disabled={computing}
+                className="px-4 py-2 rounded text-sm font-semibold bg-gradient-to-br from-cyan-brand to-verde-brand text-azul-dark hover:opacity-90 transition disabled:opacity-40">
+                {computing ? 'Calculando…' : '▶ Calcular scores ahora'}
+              </button>
+              <div className="h-6 w-px bg-white/10" />
+              <span className="text-sm text-white/50">Filtrar:</span>
+              {['', 'critico', 'en_riesgo', 'atencion', 'saludable'].map(f => (
+                <button key={f} onClick={() => setFilter(f)}
+                  className={`px-3 py-1.5 rounded text-xs font-semibold transition border ${filter === f
+                    ? (f ? classColors[f] : 'bg-cyan-brand/20 text-cyan-300 border-cyan-brand/40')
+                    : 'bg-white/5 text-white/50 hover:bg-white/10 border-white/10'}`}>
+                  {f ? classLabels[f] : 'Todos'}
+                </button>
+              ))}
+              {data?.latest_date && (
+                <span className="ml-auto text-[11px] text-white/30">Último cálculo: {data.latest_date}</span>
+              )}
+            </div>
+          </Card>
+
+          {loading && <LoadingBlock />}
+          {err && <ErrorBlock error={err} />}
+          {!loading && !err && data && !data.latest_date && (
+            <Card><p className="text-white/50 text-center py-8">No hay scores calculados aún. Presiona "Calcular scores ahora" para iniciar.</p></Card>
+          )}
+          {!loading && !err && data && data.latest_date && (
+            <>
+              {/* KPIs */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <Kpi label="Score promedio" value={data.kpis.avg_score} sub={'de ' + data.kpis.total_placas + ' placas'} variant="cyan" />
+                <Kpi label="Saludables" value={data.kpis.saludables}
+                  sub={data.kpis.pct_saludables + '%'} variant="verde" />
+                <Kpi label="En riesgo" value={data.kpis.en_riesgo}
+                  sub={Math.round(100 * (data.kpis.en_riesgo || 0) / Math.max(data.kpis.total_placas, 1)) + '%'} variant="amber" />
+                <Kpi label="Críticos" value={data.kpis.criticos}
+                  sub={data.kpis.pct_criticos + '%'} variant={data.kpis.criticos > 0 ? 'amber' : 'cyan'} />
+              </div>
+
+              {/* Donut-style breakdown */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                {['saludable', 'atencion', 'en_riesgo', 'critico'].map(cls => {
+                  const n = data.kpis[cls === 'en_riesgo' ? 'en_riesgo' : cls === 'atencion' ? 'atencion' : cls === 'critico' ? 'criticos' : 'saludables'] || 0;
+                  const pct = Math.round(100 * n / Math.max(data.kpis.total_placas, 1));
+                  return (
+                    <button key={cls} onClick={() => setFilter(filter === cls ? '' : cls)}
+                      className={`rounded-lg border p-3 text-center transition hover:scale-[1.02] ${filter === cls ? classColors[cls] + ' border-2' : 'bg-white/5 border-white/10 text-white/70'}`}>
+                      <div className="text-2xl font-bold">{n}</div>
+                      <div className="text-[11px] uppercase tracking-wider mt-1">{classLabels[cls]}</div>
+                      <div className="text-[10px] text-white/40 mt-0.5">{pct}%</div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Table */}
+              <Card
+                title={filter ? classLabels[filter] : 'Todas las placas'}
+                subtitle={data.total + ' resultados'}
+                titleAction={
+                  <button onClick={exportCsv} disabled={!data.rows.length}
+                    className="text-[11px] font-semibold uppercase tracking-wider bg-cyan-brand/10 hover:bg-cyan-brand/20 border border-cyan-brand/40 text-cyan-300 px-3 py-1.5 rounded transition disabled:opacity-40">
+                    ↓ Export CSV
+                  </button>
+                }
+              >
+                <div className="overflow-x-auto -mx-5">
+                  <table className="min-w-full text-sm">
+                    <thead>
+                      <tr>
+                        <th className="px-3 py-2 text-left text-white/70 text-[11px] uppercase">Placa</th>
+                        <th className="px-3 py-2 text-left text-white/70 text-[11px] uppercase">Conductor</th>
+                        <th className="px-3 py-2 text-center text-white/70 text-[11px] uppercase">Score</th>
+                        <th className="px-3 py-2 text-center text-white/70 text-[11px] uppercase">Estado</th>
+                        <th className="px-3 py-2 text-right text-white/70 text-[11px] uppercase">Días inactivo</th>
+                        <th className="px-3 py-2 text-right text-white/70 text-[11px] uppercase">Cargas (90d)</th>
+                        <th className="px-3 py-2 text-right text-white/70 text-[11px] uppercase">Litros (90d)</th>
+                        <th className="px-3 py-2 text-left text-white/70 text-[11px] uppercase">Segmento</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/5">
+                      {data.rows.map((r, i) => (
+                        <tr key={i} className="hover:bg-white/5 cursor-pointer" onClick={() => onPlacaClick(r.placa)}>
+                          <td className="px-3 py-2 font-mono text-cyan-300 font-semibold">{r.placa}</td>
+                          <td className="px-3 py-2 text-white/80 text-xs truncate max-w-[160px]">{r.nombre || '—'}</td>
+                          <td className="px-3 py-2">{scoreBar(r.score_total)}</td>
+                          <td className="px-3 py-2 text-center">
+                            <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold uppercase border ${classColors[r.classification] || 'text-white/50'}`}>
+                              {classLabels[r.classification] || r.classification}
+                            </span>
+                          </td>
+                          <td className={`px-3 py-2 text-right font-tabular font-semibold ${r.dias_sin_cargar > 14 ? 'text-red-400' : r.dias_sin_cargar > 7 ? 'text-amber-400' : 'text-white/90'}`}>
+                            {r.dias_sin_cargar}
+                          </td>
+                          <td className="px-3 py-2 text-right font-tabular text-white/90">{r.cargas_90d}</td>
+                          <td className="px-3 py-2 text-right font-tabular text-white/90">{num(r.litros_90d)}</td>
+                          <td className="px-3 py-2 text-white/60 text-xs">{r.segmento || '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {data.rows.length === 0 && (
+                  <div className="text-white/40 text-sm text-center py-6">No hay placas en esta clasificación</div>
+                )}
+              </Card>
+            </>
+          )}
+        </div>
+      );
+    }
+
+    // ====================================================
     // Header + tabs
     // ====================================================
     function Header({ tab, onTab, onSearch }) {
@@ -852,6 +1050,7 @@
         { id: 'sp', label: 'Sobreprecio' },
         { id: 'cmu', label: 'Cartera CMU' },
         { id: 'retention', label: 'Retención' },
+        { id: 'health', label: 'Health Score' },
         { id: 'upload', label: 'Upload' },
       ];
       return (
@@ -1636,6 +1835,7 @@
             {tab === 'sp' && <SobreprecioTab />}
             {tab === 'cmu' && <CmuTab />}
             {tab === 'retention' && <RetentionTab onPlacaClick={setPlacaModal} />}
+            {tab === 'health' && <HealthTab onPlacaClick={setPlacaModal} />}
             {tab === 'upload' && <UploadTab />}
           </main>
 

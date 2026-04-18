@@ -912,3 +912,326 @@ def retention_alerts(days_inactive: int = 7, min_cargas: int = 3) -> dict:
         "litros_at_risk": litros_at_risk,
         "rows": rows,
     }
+
+
+# ============================================================
+# Health Score Engine — compute + persist + query
+# ============================================================
+
+def ensure_health_scores_table():
+    """Create health_scores table if it doesn't exist."""
+    conn = _get_conn()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS health_scores (
+                        id SERIAL PRIMARY KEY,
+                        placa VARCHAR(20) NOT NULL,
+                        score_date DATE NOT NULL DEFAULT CURRENT_DATE,
+                        score_total NUMERIC(5,1) NOT NULL,
+                        freq_score NUMERIC(5,1) NOT NULL DEFAULT 0,
+                        volume_score NUMERIC(5,1) NOT NULL DEFAULT 0,
+                        days_inactive_score NUMERIC(5,1) NOT NULL DEFAULT 0,
+                        financial_score NUMERIC(5,1) NOT NULL DEFAULT 0,
+                        loyalty_score NUMERIC(5,1) NOT NULL DEFAULT 0,
+                        classification VARCHAR(20) NOT NULL DEFAULT 'unknown',
+                        dias_sin_cargar INT DEFAULT 0,
+                        cargas_90d INT DEFAULT 0,
+                        litros_90d NUMERIC(12,2) DEFAULT 0,
+                        computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        UNIQUE(placa, score_date)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_hs_placa ON health_scores(placa);
+                    CREATE INDEX IF NOT EXISTS idx_hs_date ON health_scores(score_date DESC);
+                    CREATE INDEX IF NOT EXISTS idx_hs_class ON health_scores(classification);
+                """)
+    finally:
+        conn.close()
+
+
+def compute_health_scores() -> dict:
+    """
+    Calculate health score (0–100) for every placa with activity in last 180 days.
+    Weights: frequency 35%, volume 20%, days_inactive 25%, financial 15%, loyalty 5%.
+    Persists to health_scores table (upsert on placa+score_date).
+    Returns summary stats.
+    """
+    ensure_health_scores_table()
+    conn = _get_conn()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                # Get all placas with at least 1 transaction in last 180 days
+                cur.execute("""
+                    WITH placa_stats AS (
+                        SELECT
+                            t.placa,
+                            -- Frequency: cargas in last 30d
+                            COUNT(*) FILTER (WHERE t.timestamp_local >= NOW() - INTERVAL '30 days') AS cargas_30d,
+                            -- Historical avg cargas per 30d (over last 180d)
+                            COUNT(*)::numeric / GREATEST(
+                                EXTRACT(DAY FROM NOW() - MIN(t.timestamp_local)) / 30.0, 1
+                            ) AS avg_cargas_30d,
+                            -- Volume: avg litros last 5 cargas vs historical
+                            AVG(t.litros) AS avg_litros_all,
+                            -- Days since last carga
+                            EXTRACT(DAY FROM NOW() - MAX(t.timestamp_local))::int AS dias_sin_cargar,
+                            -- Total cargas in 90d
+                            COUNT(*) FILTER (WHERE t.timestamp_local >= NOW() - INTERVAL '90 days') AS cargas_90d,
+                            COALESCE(SUM(t.litros) FILTER (WHERE t.timestamp_local >= NOW() - INTERVAL '90 days'), 0) AS litros_90d,
+                            -- Recaudo health (CMU): has overdue? (recaudo_pagado > 0 means active in CMU)
+                            COUNT(*) FILTER (WHERE t.recaudo_pagado > 0) AS cargas_cmu,
+                            -- Station loyalty: % at most-frequent station
+                            MODE() WITHIN GROUP (ORDER BY t.station_natgas) AS estacion_frecuente,
+                            COUNT(*) AS total_cargas
+                        FROM transactions t
+                        WHERE t.timestamp_local >= NOW() - INTERVAL '180 days'
+                        GROUP BY t.placa
+                    ),
+                    with_loyalty AS (
+                        SELECT
+                            ps.*,
+                            -- Count cargas at most frequent station
+                            (
+                                SELECT COUNT(*) FROM transactions t2
+                                WHERE t2.placa = ps.placa
+                                  AND t2.station_natgas = ps.estacion_frecuente
+                                  AND t2.timestamp_local >= NOW() - INTERVAL '180 days'
+                            )::numeric / GREATEST(ps.total_cargas, 1) AS loyalty_pct
+                        FROM placa_stats ps
+                    )
+                    SELECT
+                        placa,
+                        cargas_30d,
+                        avg_cargas_30d,
+                        avg_litros_all,
+                        dias_sin_cargar,
+                        cargas_90d,
+                        litros_90d,
+                        cargas_cmu,
+                        loyalty_pct,
+                        total_cargas
+                    FROM with_loyalty
+                """)
+                cols = [d[0] for d in cur.description]
+                all_placas = [dict(zip(cols, r)) for r in cur.fetchall()]
+
+                # Also get avg litros from last 5 cargas per placa
+                recent_vol = {}
+                cur.execute("""
+                    SELECT placa, avg_litros FROM (
+                        SELECT placa, AVG(litros) AS avg_litros FROM (
+                            SELECT placa, litros,
+                                   ROW_NUMBER() OVER (PARTITION BY placa ORDER BY timestamp_local DESC) AS rn
+                            FROM transactions
+                            WHERE timestamp_local >= NOW() - INTERVAL '180 days'
+                        ) sub WHERE rn <= 5
+                        GROUP BY placa
+                    ) t
+                """)
+                for r in cur.fetchall():
+                    recent_vol[r[0]] = float(r[1]) if r[1] else 0
+
+                # Calculate scores
+                scored = []
+                for p in all_placas:
+                    placa = p["placa"]
+                    if not placa:
+                        continue
+
+                    # 1. Frequency score (35%): cargas_30d vs historical avg
+                    avg30 = float(p["avg_cargas_30d"] or 1)
+                    c30 = int(p["cargas_30d"] or 0)
+                    freq_ratio = min(c30 / max(avg30, 1), 1.5)
+                    freq_score = min(freq_ratio / 1.0 * 100, 100)  # 100% of avg = 100
+
+                    # 2. Volume score (20%): recent avg vs historical avg
+                    avg_all = float(p["avg_litros_all"] or 1)
+                    avg_recent = recent_vol.get(placa, avg_all)
+                    vol_ratio = min(avg_recent / max(avg_all, 1), 1.5)
+                    volume_score = min(vol_ratio / 1.0 * 100, 100)
+
+                    # 3. Days inactive score (25%): 0 days=100, 7d=70, 14d=40, 30d=0
+                    dias = int(p["dias_sin_cargar"] or 0)
+                    if dias <= 2:
+                        inactive_score = 100
+                    elif dias <= 7:
+                        inactive_score = 100 - (dias - 2) * 6  # 100→70 over 5 days
+                    elif dias <= 14:
+                        inactive_score = 70 - (dias - 7) * 4.3  # 70→40 over 7 days
+                    elif dias <= 30:
+                        inactive_score = 40 - (dias - 14) * 2.5  # 40→0 over 16 days
+                    else:
+                        inactive_score = 0
+
+                    # 4. Financial score (15%): CMU activity (placeholder — full impl needs Odoo data)
+                    cmu_cargas = int(p["cargas_cmu"] or 0)
+                    total = int(p["total_cargas"] or 1)
+                    if cmu_cargas > 0:
+                        financial_score = 80  # Active in CMU = good baseline
+                    else:
+                        financial_score = 50  # No CMU = neutral (not penalized)
+
+                    # 5. Loyalty score (5%): % at primary station
+                    loyalty_pct = float(p["loyalty_pct"] or 0)
+                    loyalty_score = min(loyalty_pct * 100, 100)
+
+                    # Weighted total
+                    total_score = (
+                        freq_score * 0.35 +
+                        volume_score * 0.20 +
+                        inactive_score * 0.25 +
+                        financial_score * 0.15 +
+                        loyalty_score * 0.05
+                    )
+                    total_score = max(0, min(round(total_score, 1), 100))
+
+                    # Classification
+                    if total_score >= 80:
+                        classification = "saludable"
+                    elif total_score >= 60:
+                        classification = "atencion"
+                    elif total_score >= 40:
+                        classification = "en_riesgo"
+                    else:
+                        classification = "critico"
+
+                    scored.append((
+                        placa, total_score,
+                        round(freq_score, 1), round(volume_score, 1),
+                        round(inactive_score, 1), round(financial_score, 1),
+                        round(loyalty_score, 1), classification,
+                        dias, int(p["cargas_90d"] or 0),
+                        float(p["litros_90d"] or 0),
+                    ))
+
+                # Upsert all scores
+                if scored:
+                    from psycopg2.extras import execute_values
+                    execute_values(cur, """
+                        INSERT INTO health_scores
+                            (placa, score_total, freq_score, volume_score,
+                             days_inactive_score, financial_score, loyalty_score,
+                             classification, dias_sin_cargar, cargas_90d, litros_90d)
+                        VALUES %s
+                        ON CONFLICT (placa, score_date) DO UPDATE SET
+                            score_total = EXCLUDED.score_total,
+                            freq_score = EXCLUDED.freq_score,
+                            volume_score = EXCLUDED.volume_score,
+                            days_inactive_score = EXCLUDED.days_inactive_score,
+                            financial_score = EXCLUDED.financial_score,
+                            loyalty_score = EXCLUDED.loyalty_score,
+                            classification = EXCLUDED.classification,
+                            dias_sin_cargar = EXCLUDED.dias_sin_cargar,
+                            cargas_90d = EXCLUDED.cargas_90d,
+                            litros_90d = EXCLUDED.litros_90d,
+                            computed_at = NOW()
+                    """, scored)
+
+                # Summary
+                counts = {"saludable": 0, "atencion": 0, "en_riesgo": 0, "critico": 0}
+                for s in scored:
+                    counts[s[7]] = counts.get(s[7], 0) + 1
+
+    finally:
+        conn.close()
+
+    return {
+        "total_scored": len(scored),
+        "by_classification": counts,
+        "computed_at": datetime.utcnow().isoformat(),
+    }
+
+
+def get_health_scores(classification: Optional[str] = None, limit: int = 200) -> dict:
+    """
+    Get latest health scores. Optionally filter by classification.
+    Returns KPIs + list of scored placas.
+    """
+    ensure_health_scores_table()
+    conn = _get_conn()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                # Get the latest score_date
+                cur.execute("SELECT MAX(score_date) FROM health_scores")
+                latest_date = cur.fetchone()[0]
+                if not latest_date:
+                    return {
+                        "latest_date": None, "total": 0,
+                        "kpis": {}, "rows": [],
+                        "message": "No health scores computed yet. Run /api/health-scores/compute first."
+                    }
+
+                # KPIs for latest date
+                cur.execute("""
+                    SELECT
+                        COUNT(*) AS total,
+                        AVG(score_total) AS avg_score,
+                        COUNT(*) FILTER (WHERE classification = 'saludable') AS saludables,
+                        COUNT(*) FILTER (WHERE classification = 'atencion') AS atencion,
+                        COUNT(*) FILTER (WHERE classification = 'en_riesgo') AS en_riesgo,
+                        COUNT(*) FILTER (WHERE classification = 'critico') AS criticos,
+                        AVG(dias_sin_cargar) AS avg_dias_inactivo
+                    FROM health_scores
+                    WHERE score_date = %s
+                """, (latest_date,))
+                row = cur.fetchone()
+                total = row[0]
+                kpis = {
+                    "total_placas": total,
+                    "avg_score": round(float(row[1] or 0), 1),
+                    "saludables": row[2],
+                    "atencion": row[3],
+                    "en_riesgo": row[4],
+                    "criticos": row[5],
+                    "pct_saludables": round(100.0 * (row[2] or 0) / max(total, 1), 1),
+                    "pct_criticos": round(100.0 * (row[5] or 0) / max(total, 1), 1),
+                    "avg_dias_inactivo": round(float(row[6] or 0), 1),
+                }
+
+                # Rows
+                where_class = ""
+                params = [latest_date]
+                if classification and classification in ("saludable", "atencion", "en_riesgo", "critico"):
+                    where_class = "AND hs.classification = %s"
+                    params.append(classification)
+
+                cur.execute(f"""
+                    SELECT
+                        hs.placa,
+                        c.nombre,
+                        c.telefono,
+                        c.segmento,
+                        hs.score_total,
+                        hs.freq_score,
+                        hs.volume_score,
+                        hs.days_inactive_score,
+                        hs.financial_score,
+                        hs.loyalty_score,
+                        hs.classification,
+                        hs.dias_sin_cargar,
+                        hs.cargas_90d,
+                        hs.litros_90d
+                    FROM health_scores hs
+                    LEFT JOIN clients c ON c.placa = hs.placa
+                    WHERE hs.score_date = %s {where_class}
+                    ORDER BY hs.score_total ASC
+                    LIMIT %s
+                """, params + [min(limit, 500)])
+                cols = [d[0] for d in cur.description]
+                rows = [
+                    {c: _serialize(v) for c, v in zip(cols, r)}
+                    for r in cur.fetchall()
+                ]
+
+    finally:
+        conn.close()
+
+    return {
+        "latest_date": str(latest_date),
+        "total": len(rows),
+        "kpis": kpis,
+        "rows": rows,
+    }
