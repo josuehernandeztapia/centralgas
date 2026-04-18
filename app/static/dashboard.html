@@ -863,30 +863,15 @@
 
       useEffect(() => { fetchData(); }, [fetchData]);
 
-      const computeScores = async () => {
-        setComputing(true);
-        try {
-          await apiGet('/api/health-scores/compute', { method: 'POST' });
-          await fetchData();
-        } catch (e) { alert('Error computing: ' + e.message); }
-        finally { setComputing(false); }
-      };
-
-      // We need POST support — small helper
-      const apiPost = async (url) => {
-        const token = sessionStorage.getItem('cg_token');
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: { 'Authorization': 'Bearer ' + token },
-        });
-        if (!res.ok) throw new Error(res.statusText);
-        return res.json();
-      };
-
       const doCompute = async () => {
         setComputing(true);
         try {
-          await apiPost('/api/health-scores/compute');
+          const res = await fetch(API_BASE + '/api/health-scores/compute', {
+            method: 'POST',
+            headers: { 'Accept': 'application/json' },
+            credentials: 'same-origin',
+          });
+          if (!res.ok) throw new Error(res.statusText);
           await fetchData();
         } catch (e) { alert('Error: ' + e.message); }
         finally { setComputing(false); }
