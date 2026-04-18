@@ -117,7 +117,7 @@ def lookup_placa_by_phone(phone: str) -> Optional[dict]:
                        c.fecha_conversion, c.consumo_prom_lt, c.eds_principal
                 FROM clients c
                 WHERE REPLACE(REPLACE(REPLACE(c.telefono, ' ', ''), '-', ''), '+', '')
-                    LIKE '%' || REPLACE(REPLACE(REPLACE(%s, ' ', ''), '-', ''), '+', '')
+                    LIKE '%%' || REPLACE(REPLACE(REPLACE(%s, ' ', ''), '-', ''), '+', '')
                 ORDER BY c.placa
                 LIMIT 5
             """, (phone_clean[-10:],))  # Match last 10 digits
