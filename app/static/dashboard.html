@@ -807,6 +807,7 @@
           if (filters.date_from) qs.set('date_from', filters.date_from);
           if (filters.date_to) qs.set('date_to', filters.date_to);
           if (filters.placa) qs.set('placa', filters.placa);
+          qs.set('limit', '200');
           setData(await apiGet('/api/recaudos?' + qs.toString()));
         } catch (e) { setErr(e); }
         finally { setLoading(false); }
@@ -826,7 +827,7 @@
       };
 
       const kpis = data?.kpis || {};
-      const byPlaca = data?.by_placa || [];
+      const byPlaca = (data?.by_placa || []).slice(0, 50);
       const byDay = (data?.by_day || []).slice().reverse();
       const inputCls = 'bg-azul-dark/50 border border-cyan-brand/20 text-white placeholder-white/30 px-3 py-2 rounded text-sm focus:border-cyan-brand/60 focus:outline-none';
 
@@ -856,16 +857,16 @@
             <>
               {/* KPIs */}
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <Kpi label="Placas activas" value={kpis.placas_activas} variant="cyan" />
-                <Kpi label="Total litros CMU" value={num(kpis.total_litros)} sub="LEQ despachados" variant="verde" />
-                <Kpi label="Total recaudado" value={'$' + num(kpis.total_recaudado)} sub="litros × tarifa" variant="amber" />
-                <Kpi label="Tarifa promedio" value={'$' + num(kpis.tarifa_promedio, 2) + '/LEQ'} sub={kpis.fecha_min ? `${kpis.fecha_min} → ${kpis.fecha_max}` : ''} variant="purple" />
+                <Kpi label="Placas activas" value={kpis.placas_activas || 0} variant="cyan" />
+                <Kpi label="Total litros CMU" value={num(kpis.total_litros || 0)} sub="LEQ despachados" variant="verde" />
+                <Kpi label="Total recaudado" value={'$' + num(kpis.total_recaudado || 0)} sub="litros × tarifa" variant="amber" />
+                <Kpi label="Tarifa promedio" value={'$' + num(kpis.tarifa_promedio || 0, 2) + '/LEQ'} sub={kpis.fecha_min ? `${kpis.fecha_min} → ${kpis.fecha_max}` : ''} variant="purple" />
               </div>
 
               {/* By placa table */}
               <Card
                 title="Desglose por placa"
-                subtitle={`${byPlaca.length} placas con recaudo`}
+                subtitle={`Top ${byPlaca.length} placas por recaudo (de ${num(kpis.placas_activas || 0)} activas)`}
                 titleAction={
                   <button type="button" onClick={exportCsv} disabled={!data?.total}
                     className="text-[11px] font-semibold uppercase tracking-wider bg-cyan-brand/10 hover:bg-cyan-brand/20 border border-cyan-brand/40 text-cyan-300 px-3 py-1.5 rounded transition disabled:opacity-40 disabled:cursor-not-allowed">
@@ -888,12 +889,12 @@
                     <tbody className="divide-y divide-white/5">
                       {byPlaca.map((p, i) => (
                         <tr key={i} className="hover:bg-white/5 transition">
-                          <td className="px-3 py-2 font-mono text-cyan-300 font-semibold">{p.placa}</td>
+                          <td className="px-3 py-2 font-mono text-cyan-300 font-semibold">{p.placa || '—'}</td>
                           <td className="px-3 py-2 text-white/80 truncate max-w-[200px]">{p.nombre || '—'}</td>
-                          <td className="px-3 py-2 text-right font-tabular text-white/90">{num(p.cargas)}</td>
-                          <td className="px-3 py-2 text-right font-tabular text-white/90">{num(p.litros)}</td>
-                          <td className="px-3 py-2 text-right font-tabular text-amber-300">${num(p.tarifa_leq, 2)}</td>
-                          <td className="px-3 py-2 text-right font-tabular font-semibold text-emerald-300">${num(p.total_recaudado)}</td>
+                          <td className="px-3 py-2 text-right font-tabular text-white/90">{num(p.cargas || 0)}</td>
+                          <td className="px-3 py-2 text-right font-tabular text-white/90">{num(p.litros || 0)}</td>
+                          <td className="px-3 py-2 text-right font-tabular text-amber-300">${num(p.tarifa_leq || 0, 2)}</td>
+                          <td className="px-3 py-2 text-right font-tabular font-semibold text-emerald-300">${num(p.total_recaudado || 0)}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -938,13 +939,13 @@
                     <tbody className="divide-y divide-white/5">
                       {(data.rows || []).slice(0, 100).map((r, i) => (
                         <tr key={i} className="hover:bg-white/5 transition">
-                          <td className="px-3 py-2 text-white/70 text-xs whitespace-nowrap">{r.fecha_venta}</td>
-                          <td className="px-3 py-2 font-mono text-cyan-300">{r.placa}</td>
+                          <td className="px-3 py-2 text-white/70 text-xs whitespace-nowrap">{r.fecha_venta || '—'}</td>
+                          <td className="px-3 py-2 font-mono text-cyan-300">{r.placa || '—'}</td>
                           <td className="px-3 py-2 text-white/80 truncate max-w-[180px] text-xs">{r.conductor || '—'}</td>
-                          <td className="px-3 py-2 text-white/70 text-xs">{trunc(r.estacion, 20)}</td>
-                          <td className="px-3 py-2 text-right font-tabular text-white/90">{num(r.litros)}</td>
-                          <td className="px-3 py-2 text-right font-tabular text-amber-300">${num(r.tarifa_leq, 2)}</td>
-                          <td className="px-3 py-2 text-right font-tabular font-semibold text-emerald-300">${num(r.cantidad_recaudo)}</td>
+                          <td className="px-3 py-2 text-white/70 text-xs">{trunc(r.estacion || '', 20)}</td>
+                          <td className="px-3 py-2 text-right font-tabular text-white/90">{num(r.litros || 0)}</td>
+                          <td className="px-3 py-2 text-right font-tabular text-amber-300">${num(r.tarifa_leq || 0, 2)}</td>
+                          <td className="px-3 py-2 text-right font-tabular font-semibold text-emerald-300">${num(r.cantidad_recaudo || 0)}</td>
                         </tr>
                       ))}
                     </tbody>

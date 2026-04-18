@@ -381,7 +381,7 @@ def list_recaudos(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     placa: Optional[str] = None,
-    limit: int = 5000,
+    limit: int = 200,
     offset: int = 0,
 ) -> dict:
     """
@@ -452,6 +452,7 @@ def list_recaudos(
                 WHERE {where_sql}
                 GROUP BY t.placa, c.nombre
                 ORDER BY total_recaudado DESC
+                LIMIT 50
             """, params)
             cols_placa = [d[0] for d in cur.description]
             by_placa = [
